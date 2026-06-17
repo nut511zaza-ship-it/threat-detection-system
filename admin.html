@@ -241,7 +241,7 @@ async function api(path, method='GET', body=null) {
   if (body) opts.body = JSON.stringify(body);
   const r = await fetch(API + path, opts);
   if (r.status === 401) {
-    window.location.href = '/admin/login';
+    window.location.href = API + '/admin/login';
     return;
   }
   return r.json();
@@ -249,7 +249,7 @@ async function api(path, method='GET', body=null) {
 
 async function adminLogout() {
   await fetch(API + '/admin/logout', { method: 'POST' });
-  window.location.href = '/admin/login';
+  window.location.href = API + '/admin/login';
 }
 
 function switchTab(name, el) {

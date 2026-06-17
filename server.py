@@ -298,7 +298,9 @@ def log_calculation(data: CalculationLog):
     return {"status": "ok", "id": new_id, "timestamp": timestamp}
 
 @app.get("/history")
-def get_history(username: str = None, limit: int = 50):
+def get_history(request: Request, username: str = None, limit: int = 50):
+    if not is_valid_admin_session(request):
+        raise HTTPException(status_code=401, detail="กรุณาเข้าสู่ระบบ admin ก่อน")
     conn = get_conn()
     c = conn.cursor()
     if username:
@@ -310,7 +312,9 @@ def get_history(username: str = None, limit: int = 50):
     return [{"id":r[0],"username":r[1],"expression":r[2],"result":r[3],"timestamp":r[4]} for r in rows]
 
 @app.get("/stats")
-def get_stats():
+def get_stats(request: Request):
+    if not is_valid_admin_session(request):
+        raise HTTPException(status_code=401, detail="กรุณาเข้าสู่ระบบ admin ก่อน")
     conn = get_conn()
     c = conn.cursor()
     c.execute("SELECT COUNT(*) FROM history")
@@ -459,11 +463,15 @@ def fetch_urlhaus_feed():
     return {"status": "ok", "total_in_feed": len(domains), "new_domains": len(new_domains), "added": added, "fetched_at": timestamp}
 
 @app.post("/threat-feed/refresh")
-def refresh_threat_feed():
+def refresh_threat_feed(request: Request):
+    if not is_valid_admin_session(request):
+        raise HTTPException(status_code=401, detail="กรุณาเข้าสู่ระบบ admin ก่อน")
     return fetch_urlhaus_feed()
 
 @app.get("/threat-feed")
-def get_threat_feed():
+def get_threat_feed(request: Request):
+    if not is_valid_admin_session(request):
+        raise HTTPException(status_code=401, detail="กรุณาเข้าสู่ระบบ admin ก่อน")
     conn = get_conn()
     c = conn.cursor()
     c.execute("SELECT domain, source, fetched_at FROM threat_feed ORDER BY id DESC")
@@ -473,7 +481,9 @@ def get_threat_feed():
 
 # ===== Whitelist =====
 @app.get("/whitelist")
-def get_whitelist():
+def get_whitelist(request: Request):
+    if not is_valid_admin_session(request):
+        raise HTTPException(status_code=401, detail="กรุณาเข้าสู่ระบบ admin ก่อน")
     conn = get_conn()
     c = conn.cursor()
     c.execute("SELECT id,domain,added_at FROM whitelist ORDER BY id DESC")
@@ -514,7 +524,9 @@ def remove_whitelist(domain: str, request: Request):
 
 # ===== DNS Log =====
 @app.get("/dns-log")
-def get_dns_log(limit: int = 100):
+def get_dns_log(request: Request, limit: int = 100):
+    if not is_valid_admin_session(request):
+        raise HTTPException(status_code=401, detail="กรุณาเข้าสู่ระบบ admin ก่อน")
     conn = get_conn()
     c = conn.cursor()
     c.execute("SELECT id,domain,status,reason,client_ip,timestamp FROM dns_log ORDER BY id DESC LIMIT ?", (limit,))
@@ -524,7 +536,9 @@ def get_dns_log(limit: int = 100):
 
 # ===== VT Cache =====
 @app.get("/vt-cache")
-def get_vt_cache(limit: int = 50):
+def get_vt_cache(request: Request, limit: int = 50):
+    if not is_valid_admin_session(request):
+        raise HTTPException(status_code=401, detail="กรุณาเข้าสู่ระบบ admin ก่อน")
     conn = get_conn()
     c = conn.cursor()
     c.execute("SELECT domain,status,reason,checked_at FROM vt_cache ORDER BY checked_at DESC LIMIT ?", (limit,))
@@ -684,7 +698,9 @@ def serve_admin(request: Request):
     return FileResponse("/opt/calculator/admin.html")
 
 @app.get("/users")
-def get_users():
+def get_users(request: Request):
+    if not is_valid_admin_session(request):
+        raise HTTPException(status_code=401, detail="กรุณาเข้าสู่ระบบ admin ก่อน")
     conn = get_conn()
     c = conn.cursor()
     c.execute("SELECT username, MAX(timestamp) as last_seen, COUNT(*) as total FROM history WHERE expression='LOGIN' GROUP BY username ORDER BY last_seen DESC")
@@ -693,7 +709,9 @@ def get_users():
     return [{"username": r[0], "last_seen": r[1], "total_logins": r[2]} for r in rows]
 
 @app.get("/user-activity")
-def get_user_activity(username: str = None, limit: int = 100):
+def get_user_activity(request: Request, username: str = None, limit: int = 100):
+    if not is_valid_admin_session(request):
+        raise HTTPException(status_code=401, detail="กรุณาเข้าสู่ระบบ admin ก่อน")
     conn = get_conn()
     c = conn.cursor()
     if username:
