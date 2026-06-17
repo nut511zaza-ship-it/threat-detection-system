@@ -1,0 +1,6 @@
+fastapi
+uvicorn[standard]
+pystray
+pillow
+pyinstaller
+python-dotenv

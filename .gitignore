@@ -1,0 +1,29 @@
+# Secrets — ห้าม push ขึ้น GitHub เด็ดขาด
+.env
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# PyInstaller build artifacts
+build/
+dist/
+*.spec
+
+# Logs (มี username จริงของ user — ไม่ควร commit)
+agent_log.txt
+*.log
+
+# OS / Editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.bak 

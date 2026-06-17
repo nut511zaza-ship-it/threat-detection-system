@@ -1,0 +1,434 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>🛡️ Threat Detection — Admin Panel</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Sarabun:wght@300;400;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #0a0c10;
+    --bg2: #0f1318;
+    --bg3: #161b22;
+    --border: #21262d;
+    --accent: #00d4aa;
+    --text: #e6edf3;
+    --text2: #7d8590;
+    --text3: #484f58;
+    --safe: #3fb950;
+    --danger: #f85149;
+    --suspicious: #d29922;
+    --mono: 'JetBrains Mono', monospace;
+    --sans: 'Sarabun', sans-serif;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: var(--bg); color: var(--text); font-family: var(--sans); min-height: 100vh; }
+  body::before {
+    content: '';
+    position: fixed; inset: 0;
+    background-image: linear-gradient(rgba(0,212,170,0.03) 1px,transparent 1px), linear-gradient(90deg,rgba(0,212,170,0.03) 1px,transparent 1px);
+    background-size: 40px 40px;
+    pointer-events: none; z-index: 0;
+  }
+  .wrap { position: relative; z-index: 1; }
+
+  header {
+    border-bottom: 1px solid var(--border);
+    padding: 16px 32px;
+    display: flex; align-items: center; justify-content: space-between;
+    background: rgba(10,12,16,0.9);
+    backdrop-filter: blur(10px);
+    position: sticky; top: 0; z-index: 100;
+  }
+  .logo { display: flex; align-items: center; gap: 12px; }
+  .logo-icon { width:36px;height:36px;background:linear-gradient(135deg,var(--accent),#00a88a);border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:18px; }
+  .logo-text { font-family:var(--mono);font-size:14px;font-weight:700;color:var(--accent);letter-spacing:1px; }
+  .logo-sub { font-size:11px;color:var(--text2);font-family:var(--mono); }
+  .status-dot { display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text2);font-family:var(--mono); }
+  .dot { width:8px;height:8px;border-radius:50%;background:var(--safe);box-shadow:0 0 8px var(--safe);animation:pulse 2s infinite; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+
+  .tabs { display:flex;gap:2px;padding:24px 32px 0;border-bottom:1px solid var(--border); }
+  .tab { padding:10px 20px;font-size:13px;font-family:var(--mono);color:var(--text2);border:none;background:none;cursor:pointer;border-bottom:2px solid transparent;margin-bottom:-1px;transition:all .2s;position:relative; }
+  .tab:hover { color:var(--text); }
+  .tab.active { color:var(--accent);border-bottom-color:var(--accent); }
+
+  main { padding: 32px; }
+  .panel { display:none; }
+  .panel.active { display:block; }
+
+  .stats-bar { display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-bottom:32px; }
+  .two-col { display:grid;grid-template-columns:1fr 1fr;gap:16px;align-items:start; }
+  .notice { background:var(--bg2);border:1px solid var(--suspicious);border-left:3px solid var(--suspicious);border-radius:8px;padding:14px 18px;margin-bottom:24px;display:flex;align-items:center;gap:12px; }
+  .notice-icon { font-size:20px; }
+  .notice-title { font-size:13px;font-weight:600;color:var(--text); }
+  .notice-sub { font-size:12px;color:var(--text2);margin-top:2px; }
+  .stat-card { background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:20px;position:relative;overflow:hidden; }
+  .stat-card::before { content:'';position:absolute;top:0;left:0;right:0;height:2px; }
+  .stat-card.red::before { background:var(--danger); }
+  .stat-card.green::before { background:var(--safe); }
+  .stat-card.blue::before { background:var(--accent); }
+  .stat-label { font-size:11px;font-family:var(--mono);color:var(--text2);text-transform:uppercase;letter-spacing:1px;margin-bottom:8px; }
+  .stat-value { font-size:32px;font-family:var(--mono);font-weight:700;color:var(--text); }
+  .stat-sub { font-size:11px;color:var(--text3);margin-top:4px; }
+
+  .donut-card { display:flex;align-items:center;gap:16px; }
+  .donut-wrap { position:relative;width:64px;height:64px;flex-shrink:0; }
+  .donut-wrap svg { transform:rotate(-90deg); }
+  .donut-num { position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-family:var(--mono);font-size:18px;font-weight:700; }
+
+  .section { background:var(--bg2);border:1px solid var(--border);border-radius:10px;overflow:hidden;margin-bottom:24px; }
+  .section-header { padding:16px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between; }
+  .section-title { font-family:var(--mono);font-size:13px;font-weight:600;color:var(--text); }
+
+  .add-form { display:flex;gap:10px;padding:16px 20px;border-bottom:1px solid var(--border);background:var(--bg3); }
+  .add-form input { flex:1;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:8px 14px;color:var(--text);font-family:var(--mono);font-size:13px;outline:none;transition:border-color .2s; }
+  .add-form input:focus { border-color:var(--accent); }
+  .add-form input::placeholder { color:var(--text3); }
+
+  .btn { padding:8px 18px;border-radius:6px;border:none;font-family:var(--mono);font-size:12px;font-weight:600;cursor:pointer;transition:all .2s;letter-spacing:.5px; }
+  .btn-primary { background:var(--accent);color:#000; }
+  .btn-primary:hover { background:#00f0c0; }
+  .btn-danger { background:transparent;color:var(--danger);border:1px solid var(--danger); }
+  .btn-danger:hover { background:var(--danger);color:#fff; }
+  .btn-sm { padding:4px 10px;font-size:11px; }
+  .btn-refresh { background:transparent;border:1px solid var(--border);color:var(--text2);padding:6px 12px;border-radius:6px;font-family:var(--mono);font-size:11px;cursor:pointer;transition:all .2s; }
+  .btn-refresh:hover { border-color:var(--accent);color:var(--accent); }
+
+  table { width:100%;border-collapse:collapse; }
+  th { padding:10px 20px;text-align:left;font-family:var(--mono);font-size:11px;color:var(--text2);text-transform:uppercase;letter-spacing:1px;border-bottom:1px solid var(--border);background:var(--bg3); }
+  td { padding:12px 20px;font-family:var(--mono);font-size:13px;border-bottom:1px solid var(--border);color:var(--text); }
+  tr:last-child td { border-bottom:none; }
+  tr:hover td { background:rgba(255,255,255,.02); }
+
+  .badge { display:inline-flex;align-items:center;gap:5px;padding:3px 8px;border-radius:4px;font-size:11px;font-family:var(--mono);font-weight:600; }
+  .badge-safe { background:rgba(63,185,80,.15);color:var(--safe); }
+  .badge-danger { background:rgba(248,81,73,.15);color:var(--danger); }
+  .badge-suspicious { background:rgba(210,153,34,.15);color:var(--suspicious); }
+  .badge-blacklist { background:rgba(248,81,73,.15);color:var(--danger); }
+  .badge-whitelist { background:rgba(63,185,80,.15);color:var(--safe); }
+
+  .user-row { display:flex;align-items:center;justify-content:space-between;padding:14px 20px;border-bottom:1px solid var(--border); }
+  .user-row:last-child { border-bottom:none; }
+  .user-ip { display:flex;align-items:center;gap:10px;font-family:var(--mono);font-size:14px;color:var(--text); }
+  .user-ip-icon { width:32px;height:32px;background:var(--bg3);border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:14px; }
+  .user-time { font-family:var(--mono);font-size:12px;color:var(--text2); }
+
+  .loading { padding:40px;text-align:center;color:var(--text2);font-family:var(--mono);font-size:13px; }
+  .empty { padding:40px;text-align:center;color:var(--text3);font-family:var(--mono);font-size:13px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="logo">
+      <div class="logo-icon">🛡️</div>
+      <div>
+        <div class="logo-text">THREAT DETECTION</div>
+        <div class="logo-sub">Admin Panel</div>
+      </div>
+    </div>
+    <div class="status-dot">
+      <div class="dot"></div>
+      <span id="server-status">กำลังเชื่อมต่อ...</span>
+    </div>
+    <button onclick="adminLogout()" style="margin-left:16px;background:transparent;border:1px solid var(--border);color:var(--text2);padding:6px 14px;border-radius:6px;font-size:12px;cursor:pointer">ออกจากระบบ</button>
+  </header>
+
+  <div class="tabs">
+    <button class="tab active" onclick="switchTab('dashboard', this)">📊 Dashboard</button>
+    <button class="tab" onclick="switchTab('blacklist', this)">🚫 Blacklist</button>
+    <button class="tab" onclick="switchTab('whitelist', this)">✅ Whitelist</button>
+    <button class="tab" onclick="switchTab('users', this)">👥 User Activity</button>
+  </div>
+
+  <main>
+    <div id="tab-dashboard" class="panel active">
+      <div id="threat-notice" style="display:none;"></div>
+      <div class="stats-bar">
+        <div class="stat-card red">
+          <div class="stat-label">Blacklist</div>
+          <div class="stat-value" id="stat-blacklist">—</div>
+          <div class="stat-sub">domains ที่บล็อก</div>
+        </div>
+        <div class="stat-card green">
+          <div class="stat-label">Whitelist</div>
+          <div class="stat-value" id="stat-whitelist">—</div>
+          <div class="stat-sub">domains ที่อนุญาต</div>
+        </div>
+        <div class="stat-card blue donut-card">
+          <div class="donut-wrap">
+            <svg width="64" height="64" viewBox="0 0 64 64">
+              <circle cx="32" cy="32" r="27" fill="none" stroke="var(--border)" stroke-width="7"/>
+              <circle id="donut-circle" cx="32" cy="32" r="27" fill="none" stroke="var(--accent)" stroke-width="7" stroke-dasharray="169.6" stroke-dashoffset="169.6" stroke-linecap="round"/>
+            </svg>
+            <div class="donut-num" id="stat-today">0</div>
+          </div>
+          <div>
+            <div class="stat-label" style="margin-bottom:4px">เข้าใช้งานวันนี้</div>
+            <div class="stat-sub">user / IP</div>
+          </div>
+        </div>
+      </div>
+      <div class="section">
+        <div class="section-header">
+          <span class="section-title">Recent Blocked</span>
+          <button class="btn-refresh" onclick="loadDashboard()">↻ Refresh</button>
+        </div>
+        <div id="recent-blocked"><div class="loading">กำลังโหลด...</div></div>
+      </div>
+    </div>
+
+    <div id="tab-blacklist" class="panel">
+      <div class="two-col">
+        <div class="section">
+          <div class="section-header">
+            <span class="section-title">🚫 My Blacklist</span>
+            <button class="btn-refresh" onclick="loadBlacklist()">↻ Refresh</button>
+          </div>
+          <div class="add-form">
+            <input type="text" id="bl-domain" placeholder="domain เช่น facebook.com">
+            <input type="text" id="bl-reason" placeholder="เหตุผล (optional)">
+            <button class="btn btn-primary" onclick="addBlacklist()">+ เพิ่ม</button>
+          </div>
+          <div id="blacklist-table"><div class="loading">กำลังโหลด...</div></div>
+        </div>
+
+        <div class="section">
+          <div class="section-header">
+            <span class="section-title">☁️ URLhaus Feed</span>
+            <button class="btn-refresh" onclick="loadThreatFeed()">↻ Refresh</button>
+          </div>
+          <div id="threat-feed-table"><div class="loading">กำลังโหลด...</div></div>
+          <div id="threat-feed-updated" style="padding:8px 20px;font-size:11px;color:var(--text3);border-top:1px solid var(--border)"></div>
+        </div>
+      </div>
+    </div>
+
+    <div id="tab-whitelist" class="panel">
+      <div class="section">
+        <div class="section-header">
+          <span class="section-title">✅ Whitelist Management</span>
+          <button class="btn-refresh" onclick="loadWhitelist()">↻ Refresh</button>
+        </div>
+        <div class="add-form">
+          <input type="text" id="wl-domain" placeholder="domain เช่น google.com">
+          <button class="btn btn-primary" onclick="addWhitelist()">+ เพิ่ม</button>
+        </div>
+        <div id="whitelist-table"><div class="loading">กำลังโหลด...</div></div>
+      </div>
+    </div>
+
+    <div id="tab-users" class="panel">
+      <div class="section">
+        <div class="section-header">
+          <span class="section-title">👥 User Activity</span>
+          <button class="btn-refresh" onclick="loadUsers()">↻ Refresh</button>
+        </div>
+        <div id="users-list"><div class="loading">กำลังโหลด...</div></div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<script>
+const API = window.location.protocol === 'file:'
+    ? 'http://143.14.200.159:8000'
+    : '';
+
+async function api(path, method='GET', body=null) {
+  const opts = { method, headers: {'Content-Type':'application/json'} };
+  if (body) opts.body = JSON.stringify(body);
+  const r = await fetch(API + path, opts);
+  if (r.status === 401) {
+    window.location.href = '/admin/login';
+    return;
+  }
+  return r.json();
+}
+
+async function adminLogout() {
+  await fetch(API + '/admin/logout', { method: 'POST' });
+  window.location.href = '/admin/login';
+}
+
+function switchTab(name, el) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+  el.classList.add('active');
+  document.getElementById('tab-' + name).classList.add('active');
+  if (name === 'dashboard') loadDashboard();
+  if (name === 'blacklist') { loadBlacklist(); loadThreatFeed(); }
+  if (name === 'whitelist') loadWhitelist();
+  if (name === 'users') loadUsers();
+}
+
+function badge(status) {
+  const map = {
+    safe: ['badge-safe','✓ safe'],
+    danger: ['badge-danger','✕ danger'],
+    suspicious: ['badge-suspicious','⚠ suspicious'],
+    blacklist: ['badge-blacklist','🚫 blocked'],
+    whitelist: ['badge-whitelist','✓ allowed'],
+  };
+  const [cls, label] = map[status] || ['', status];
+  return `<span class="badge ${cls}">${label}</span>`;
+}
+
+async function loadDashboard() {
+  try {
+    const [bl, wl, users] = await Promise.all([api('/blacklist'), api('/whitelist'), api('/users')]);
+    document.getElementById('stat-blacklist').textContent = bl.length;
+    document.getElementById('stat-whitelist').textContent = wl.length;
+
+    const today = new Date().toISOString().slice(0,10);
+    const todayUsers = users.filter(u => (u.last_seen||'').startsWith(today));
+    const total = users.length || 1;
+    const pct = Math.min(1, todayUsers.length / total);
+    const circumference = 2 * Math.PI * 27;
+    document.getElementById('donut-circle').setAttribute('stroke-dasharray', circumference.toFixed(1));
+    document.getElementById('donut-circle').setAttribute('stroke-dashoffset', (circumference * (1 - pct)).toFixed(1));
+    document.getElementById('stat-today').textContent = todayUsers.length;
+
+    const logs = await api('/dns-log?limit=200');
+    const recent = (logs.filter(l => l.status==='blacklist'||l.status==='danger')).slice(0,8);
+    if (!recent.length) {
+      document.getElementById('recent-blocked').innerHTML = '<div class="empty">ยังไม่มีการบล็อก</div>';
+    } else {
+      document.getElementById('recent-blocked').innerHTML = `
+        <table>
+          <thead><tr><th>Domain</th><th>Status</th><th>IP</th><th>Time</th></tr></thead>
+          <tbody>${recent.map(l => `<tr>
+            <td>${l.domain}</td>
+            <td>${badge(l.status)}</td>
+            <td style="color:var(--text2)">${l.client_ip||'—'}</td>
+            <td style="color:var(--text2)">${l.timestamp}</td>
+          </tr>`).join('')}</tbody>
+        </table>`;
+    }
+    document.getElementById('server-status').textContent = 'Server Online';
+
+    const feed = await api('/threat-feed');
+    const notice = document.getElementById('threat-notice');
+    if (feed.length) {
+      notice.style.display = 'flex';
+      notice.className = 'notice';
+      notice.innerHTML = `
+        <div class="notice-icon">⚠️</div>
+        <div>
+          <div class="notice-title">พบ domain อันตรายใหม่ ${feed.length} รายการจาก URLhaus (24 ชม.ล่าสุด)</div>
+          <div class="notice-sub">ดูรายละเอียดในกล่อง URLhaus Feed ที่แท็บ Blacklist</div>
+        </div>`;
+    } else {
+      notice.style.display = 'none';
+    }
+  } catch(e) {
+    document.getElementById('server-status').textContent = 'Server Offline';
+  }
+}
+
+async function loadBlacklist() {
+  const data = await api('/blacklist');
+  if (!data.length) { document.getElementById('blacklist-table').innerHTML = '<div class="empty">ยังไม่มี domain ใน Blacklist</div>'; return; }
+  document.getElementById('blacklist-table').innerHTML = `
+    <table>
+      <thead><tr><th>Domain</th><th>Reason</th><th>Added At</th><th>Action</th></tr></thead>
+      <tbody>${data.map(d => `<tr>
+        <td>${d.domain}</td>
+        <td style="color:var(--text2)">${d.reason||'—'}</td>
+        <td style="color:var(--text2)">${d.added_at}</td>
+        <td><button class="btn btn-danger btn-sm" onclick="deleteBlacklist('${d.domain}')">ลบ</button></td>
+      </tr>`).join('')}</tbody>
+    </table>`;
+}
+
+async function addBlacklist() {
+  const domain = document.getElementById('bl-domain').value.trim();
+  const reason = document.getElementById('bl-reason').value.trim();
+  if (!domain) { alert('กรุณากรอก domain'); return; }
+  await api('/blacklist', 'POST', {domain, reason});
+  document.getElementById('bl-domain').value = '';
+  document.getElementById('bl-reason').value = '';
+  loadBlacklist();
+}
+
+async function deleteBlacklist(domain) {
+  if (!confirm(`ลบ ${domain} ออกจาก Blacklist?`)) return;
+  await api('/blacklist/' + encodeURIComponent(domain), 'DELETE');
+  loadBlacklist();
+}
+
+async function loadThreatFeed() {
+  const data = await api('/threat-feed');
+  if (!data.length) {
+    document.getElementById('threat-feed-table').innerHTML = '<div class="empty">ยังไม่มี domain ใหม่จาก URLhaus</div>';
+    document.getElementById('threat-feed-updated').textContent = '';
+    return;
+  }
+  document.getElementById('threat-feed-table').innerHTML = `
+    <table>
+      <thead><tr><th>Domain</th><th>Action</th></tr></thead>
+      <tbody>${data.map(d => `<tr>
+        <td style="font-size:12px">${d.domain}</td>
+        <td><button class="btn btn-primary btn-sm" onclick="addToBlacklistFromFeed('${d.domain}')">+ เพิ่ม</button></td>
+      </tr>`).join('')}</tbody>
+    </table>`;
+  document.getElementById('threat-feed-updated').textContent = 'อัปเดตล่าสุด: ' + (data[0].fetched_at || '—');
+}
+
+async function addToBlacklistFromFeed(domain) {
+  await api('/blacklist', 'POST', {domain, reason: 'URLhaus threat feed'});
+  loadBlacklist();
+  loadThreatFeed();
+  loadDashboard();
+}
+
+async function loadWhitelist() {
+  const data = await api('/whitelist');
+  if (!data.length) { document.getElementById('whitelist-table').innerHTML = '<div class="empty">ยังไม่มี domain ใน Whitelist</div>'; return; }
+  document.getElementById('whitelist-table').innerHTML = `
+    <table>
+      <thead><tr><th>Domain</th><th>Added At</th><th>Action</th></tr></thead>
+      <tbody>${data.map(d => `<tr>
+        <td>${d.domain}</td>
+        <td style="color:var(--text2)">${d.added_at}</td>
+        <td><button class="btn btn-danger btn-sm" onclick="deleteWhitelist('${d.domain}')">ลบ</button></td>
+      </tr>`).join('')}</tbody>
+    </table>`;
+}
+
+async function addWhitelist() {
+  const domain = document.getElementById('wl-domain').value.trim();
+  if (!domain) { alert('กรุณากรอก domain'); return; }
+  await api('/whitelist', 'POST', {domain});
+  document.getElementById('wl-domain').value = '';
+  loadWhitelist();
+}
+
+async function deleteWhitelist(domain) {
+  if (!confirm(`ลบ ${domain} ออกจาก Whitelist?`)) return;
+  await api('/whitelist/' + encodeURIComponent(domain), 'DELETE');
+  loadWhitelist();
+}
+
+async function loadUsers() {
+  const users = await api('/users');
+  if (!users.length) {
+    document.getElementById('users-list').innerHTML = '<div class="empty">ยังไม่มี user</div>';
+    return;
+  }
+  document.getElementById('users-list').innerHTML = users.map(u => `
+    <div class="user-row">
+      <div class="user-ip">
+        <div class="user-ip-icon">👤</div>
+        <span>${u.username}</span>
+      </div>
+      <div class="user-time">${u.last_seen || '—'}</div>
+    </div>`).join('');
+}
+
+loadDashboard();
+setInterval(loadDashboard, 30000);
+</script>
+</body>
+</html>
