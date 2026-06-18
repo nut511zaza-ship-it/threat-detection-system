@@ -319,7 +319,6 @@ def forgot_password(data: ForgotPasswordRequest):
     if row:
         username = row[0]
         token = secrets.token_urlsafe(32)
-        expires_at = (datetime.now()).strftime("%Y-%m-%d %H:%M:%S")
         from datetime import timedelta
         expires_dt = datetime.now() + timedelta(minutes=15)
         c.execute("INSERT INTO password_resets (token, username, expires_at, used) VALUES (?,?,?,0)",
@@ -838,57 +837,6 @@ def get_user_activity(request: Request, username: str = None, limit: int = 100):
     rows = c.fetchall()
     conn.close()
     return [{"username": r[0], "domain": r[1], "status": r[2], "timestamp": r[3]} for r in rows]
-
-# ===== User Management (Admin) =====
-class UserEditRequest(BaseModel):
-    email: str = None
-    new_password: str = None
-
-@app.get("/admin/users-full")
-def get_users_full(request: Request):
-    if not is_valid_admin_session(request):
-        raise HTTPException(status_code=401, detail="กรุณาเข้าสู่ระบบ admin ก่อน")
-    conn = get_conn()
-    c = conn.cursor()
-    c.execute("SELECT username, email, created_at FROM users ORDER BY id DESC")
-    rows = c.fetchall()
-    conn.close()
-    return [{"username": r[0], "email": r[1] or "", "created_at": r[2]} for r in rows]
-
-@app.put("/admin/users/{username}")
-def edit_user(username: str, data: UserEditRequest, request: Request):
-    if not is_valid_admin_session(request):
-        raise HTTPException(status_code=401, detail="กรุณาเข้าสู่ระบบ admin ก่อน")
-    conn = get_conn()
-    c = conn.cursor()
-    c.execute("SELECT id FROM users WHERE username=?", (username,))
-    if not c.fetchone():
-        conn.close()
-        raise HTTPException(status_code=404, detail="ไม่พบผู้ใช้นี้")
-
-    if data.email is not None:
-        c.execute("UPDATE users SET email=? WHERE username=?", (data.email.strip(), username))
-    if data.new_password:
-        salt = secrets.token_hex(16)
-        password_hash = hash_password(data.new_password, salt)
-        c.execute("UPDATE users SET password_hash=?, salt=? WHERE username=?", (password_hash, salt, username))
-    conn.commit()
-    conn.close()
-    return {"status": "ok", "username": username}
-
-@app.delete("/admin/users/{username}")
-def delete_user(username: str, request: Request):
-    if not is_valid_admin_session(request):
-        raise HTTPException(status_code=401, detail="กรุณาเข้าสู่ระบบ admin ก่อน")
-    conn = get_conn()
-    c = conn.cursor()
-    c.execute("DELETE FROM users WHERE username=?", (username,))
-    conn.commit()
-    affected = c.rowcount
-    conn.close()
-    if affected == 0:
-        raise HTTPException(status_code=404, detail="ไม่พบผู้ใช้นี้")
-    return {"status": "deleted", "username": username}
 
 @app.get("/")
 def root():

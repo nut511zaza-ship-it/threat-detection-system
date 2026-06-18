@@ -140,7 +140,6 @@
     <button class="tab" onclick="switchTab('blacklist', this)">🚫 Blacklist</button>
     <button class="tab" onclick="switchTab('whitelist', this)">✅ Whitelist</button>
     <button class="tab" onclick="switchTab('users', this)">👥 User Activity</button>
-    <button class="tab" onclick="switchTab('manage-users', this)">🛠️ Manage Users</button>
   </div>
 
   <main>
@@ -229,16 +228,6 @@
         <div id="users-list"><div class="loading">กำลังโหลด...</div></div>
       </div>
     </div>
-
-    <div id="tab-manage-users" class="panel">
-      <div class="section">
-        <div class="section-header">
-          <span class="section-title">🛠️ Manage Users</span>
-          <button class="btn-refresh" onclick="loadManageUsers()">↻ Refresh</button>
-        </div>
-        <div id="manage-users-table"><div class="loading">กำลังโหลด...</div></div>
-      </div>
-    </div>
   </main>
 </div>
 
@@ -272,7 +261,6 @@ function switchTab(name, el) {
   if (name === 'blacklist') { loadBlacklist(); loadThreatFeed(); }
   if (name === 'whitelist') loadWhitelist();
   if (name === 'users') loadUsers();
-  if (name === 'manage-users') loadManageUsers();
 }
 
 function badge(status) {
@@ -437,48 +425,6 @@ async function loadUsers() {
       </div>
       <div class="user-time">${u.last_seen || '—'}</div>
     </div>`).join('');
-}
-
-async function loadManageUsers() {
-  const users = await api('/admin/users-full');
-  if (!users || !users.length) {
-    document.getElementById('manage-users-table').innerHTML = '<div class="empty">ยังไม่มี user</div>';
-    return;
-  }
-  document.getElementById('manage-users-table').innerHTML = `
-    <table>
-      <thead><tr><th>Username</th><th>Email</th><th>สมัครเมื่อ</th><th>จัดการ</th></tr></thead>
-      <tbody>${users.map(u => `<tr>
-        <td style="font-family:var(--mono);font-size:13px">${u.username}</td>
-        <td style="font-size:12px">${u.email || '<span style="color:var(--text3)">—</span>'}</td>
-        <td style="font-size:12px;color:var(--text2)">${u.created_at}</td>
-        <td>
-          <button class="btn btn-sm" onclick="editUserEmail('${u.username}', '${u.email || ''}')">แก้ไอเมล</button>
-          <button class="btn btn-sm" onclick="resetUserPassword('${u.username}')">รีเซ็ตรหัส</button>
-          <button class="btn btn-sm btn-danger" onclick="deleteManagedUser('${u.username}')">ลบ</button>
-        </td>
-      </tr>`).join('')}</tbody>
-    </table>`;
-}
-
-async function editUserEmail(username, currentEmail) {
-  const newEmail = prompt(`แก้ไอเมลของ ${username}:`, currentEmail);
-  if (newEmail === null) return;
-  await api(`/admin/users/${encodeURIComponent(username)}`, 'PUT', {email: newEmail});
-  loadManageUsers();
-}
-
-async function resetUserPassword(username) {
-  const newPassword = prompt(`ตั้งรหัสผ่านใหม่สำหรับ ${username}:`);
-  if (!newPassword) return;
-  await api(`/admin/users/${encodeURIComponent(username)}`, 'PUT', {new_password: newPassword});
-  alert(`เปลี่ยนรหัสผ่านของ ${username} แล้ว`);
-}
-
-async function deleteManagedUser(username) {
-  if (!confirm(`ลบผู้ใช้ ${username} ออกจากระบบ? (การกระทำนี้ไม่สามารถย้อนกลับได้)`)) return;
-  await api(`/admin/users/${encodeURIComponent(username)}`, 'DELETE');
-  loadManageUsers();
 }
 
 loadDashboard();
