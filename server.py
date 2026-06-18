@@ -10,6 +10,8 @@ import time
 import os
 import hashlib
 import secrets
+import smtplib
+from email.mime.text import MIMEText
 
 try:
     from dotenv import load_dotenv
@@ -77,7 +79,19 @@ def init_db():
         username TEXT UNIQUE NOT NULL,
         password_hash TEXT NOT NULL,
         salt TEXT NOT NULL,
+        email TEXT,
         created_at TEXT NOT NULL
+    )""")
+    # Migration: เพิ่ม column email ให้ database เก่าที่สร้างไว้ก่อนหน้านี้
+    try:
+        c.execute("ALTER TABLE users ADD COLUMN email TEXT")
+    except sqlite3.OperationalError:
+        pass
+    c.execute("""CREATE TABLE IF NOT EXISTS password_resets (
+        token TEXT PRIMARY KEY,
+        username TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        used INTEGER NOT NULL DEFAULT 0
     )""")
     c.execute("""CREATE TABLE IF NOT EXISTS threat_feed (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -196,6 +210,14 @@ class DomainEntry(BaseModel):
 class AuthRequest(BaseModel):
     username: str
     password: str
+    email: str = ""
+
+class ForgotPasswordRequest(BaseModel):
+    email: str
+
+class ResetPasswordRequest(BaseModel):
+    token: str
+    new_password: str
 
 # ===== Password hashing =====
 def hash_password(password: str, salt: str) -> str:
@@ -236,8 +258,11 @@ def is_valid_admin_session(request: Request) -> bool:
 def register(data: AuthRequest):
     username = data.username.strip()
     password = data.password
+    email = data.email.strip()
     if not username or not password:
         raise HTTPException(status_code=400, detail="กรุณากรอกชื่อผู้ใช้และรหัสผ่าน")
+    if not email:
+        raise HTTPException(status_code=400, detail="กรุณากรอกอีเมล (ใช้สำหรับกู้คืนรหัสผ่าน)")
 
     conn = get_conn()
     c = conn.cursor()
@@ -249,11 +274,103 @@ def register(data: AuthRequest):
     salt = secrets.token_hex(16)
     password_hash = hash_password(password, salt)
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    c.execute("INSERT INTO users (username,password_hash,salt,created_at) VALUES (?,?,?,?)",
-              (username, password_hash, salt, timestamp))
+    c.execute("INSERT INTO users (username,password_hash,salt,email,created_at) VALUES (?,?,?,?,?)",
+              (username, password_hash, salt, email, timestamp))
     conn.commit()
     conn.close()
     return {"status": "ok", "username": username}
+
+# ===== Email (Gmail SMTP) สำหรับ reset password =====
+SMTP_HOST = "smtp.gmail.com"
+SMTP_PORT = 587
+SMTP_USER = os.environ.get("SMTP_USER", "")
+SMTP_APP_PASSWORD = os.environ.get("SMTP_APP_PASSWORD", "")
+SITE_URL = os.environ.get("SITE_URL", "http://143.14.200.159:8000")
+
+def send_email(to_email: str, subject: str, body: str) -> bool:
+    if not SMTP_USER or not SMTP_APP_PASSWORD:
+        return False
+    try:
+        msg = MIMEText(body, "plain", "utf-8")
+        msg["Subject"] = subject
+        msg["From"] = SMTP_USER
+        msg["To"] = to_email
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=10) as server:
+            server.starttls()
+            server.login(SMTP_USER, SMTP_APP_PASSWORD)
+            server.sendmail(SMTP_USER, [to_email], msg.as_string())
+        return True
+    except Exception as e:
+        print(f"ส่งอีเมลไม่สำเร็จ: {e}")
+        return False
+
+@app.post("/forgot-password")
+def forgot_password(data: ForgotPasswordRequest):
+    email = data.email.strip()
+    if not email:
+        raise HTTPException(status_code=400, detail="กรุณากรอกอีเมล")
+
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("SELECT username FROM users WHERE email=?", (email,))
+    row = c.fetchone()
+
+    # ไม่บอกว่าพบ/ไม่พบอีเมล เพื่อความปลอดภัย (ป้องกันการเดาว่าอีเมลไหนมีในระบบ)
+    if row:
+        username = row[0]
+        token = secrets.token_urlsafe(32)
+        expires_at = (datetime.now()).strftime("%Y-%m-%d %H:%M:%S")
+        from datetime import timedelta
+        expires_dt = datetime.now() + timedelta(minutes=15)
+        c.execute("INSERT INTO password_resets (token, username, expires_at, used) VALUES (?,?,?,0)",
+                  (token, username, expires_dt.strftime("%Y-%m-%d %H:%M:%S")))
+        conn.commit()
+
+        reset_link = f"{SITE_URL}/reset-password?token={token}"
+        body = f"""สวัสดีคุณ {username}
+
+คุณได้ขอกู้คืนรหัสผ่านสำหรับระบบ Threat Detection
+กรุณาคลิกลิงก์ด้านล่างเพื่อตั้งรหัสผ่านใหม่ (ลิงก์นี้จะหมดอายุภายใน 15 นาที):
+
+{reset_link}
+
+หากคุณไม่ได้ขอกู้คืนรหัสผ่าน กรุณาเพิกเฉยต่ออีเมลนี้
+"""
+        send_email(email, "กู้คืนรหัสผ่าน — Threat Detection System", body)
+
+    conn.close()
+    return {"status": "ok", "message": "หากอีเมลนี้มีอยู่ในระบบ เราได้ส่งลิงก์กู้คืนรหัสผ่านไปแล้ว"}
+
+@app.post("/reset-password")
+def reset_password(data: ResetPasswordRequest):
+    token = data.token.strip()
+    new_password = data.new_password
+    if not token or not new_password:
+        raise HTTPException(status_code=400, detail="ข้อมูลไม่ครบถ้วน")
+
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("SELECT username, expires_at, used FROM password_resets WHERE token=?", (token,))
+    row = c.fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(status_code=400, detail="ลิงก์ไม่ถูกต้องหรือไม่พบ")
+
+    username, expires_at, used = row
+    if used:
+        conn.close()
+        raise HTTPException(status_code=400, detail="ลิงก์นี้ถูกใช้ไปแล้ว")
+    if datetime.now() > datetime.strptime(expires_at, "%Y-%m-%d %H:%M:%S"):
+        conn.close()
+        raise HTTPException(status_code=400, detail="ลิงก์หมดอายุแล้ว กรุณาขอลิงก์ใหม่")
+
+    salt = secrets.token_hex(16)
+    password_hash = hash_password(new_password, salt)
+    c.execute("UPDATE users SET password_hash=?, salt=? WHERE username=?", (password_hash, salt, username))
+    c.execute("UPDATE password_resets SET used=1 WHERE token=?", (token,))
+    conn.commit()
+    conn.close()
+    return {"status": "ok", "message": "เปลี่ยนรหัสผ่านสำเร็จแล้ว"}
 
 @app.post("/login")
 def login(data: AuthRequest):
@@ -722,6 +839,57 @@ def get_user_activity(request: Request, username: str = None, limit: int = 100):
     conn.close()
     return [{"username": r[0], "domain": r[1], "status": r[2], "timestamp": r[3]} for r in rows]
 
+# ===== User Management (Admin) =====
+class UserEditRequest(BaseModel):
+    email: str = None
+    new_password: str = None
+
+@app.get("/admin/users-full")
+def get_users_full(request: Request):
+    if not is_valid_admin_session(request):
+        raise HTTPException(status_code=401, detail="กรุณาเข้าสู่ระบบ admin ก่อน")
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("SELECT username, email, created_at FROM users ORDER BY id DESC")
+    rows = c.fetchall()
+    conn.close()
+    return [{"username": r[0], "email": r[1] or "", "created_at": r[2]} for r in rows]
+
+@app.put("/admin/users/{username}")
+def edit_user(username: str, data: UserEditRequest, request: Request):
+    if not is_valid_admin_session(request):
+        raise HTTPException(status_code=401, detail="กรุณาเข้าสู่ระบบ admin ก่อน")
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("SELECT id FROM users WHERE username=?", (username,))
+    if not c.fetchone():
+        conn.close()
+        raise HTTPException(status_code=404, detail="ไม่พบผู้ใช้นี้")
+
+    if data.email is not None:
+        c.execute("UPDATE users SET email=? WHERE username=?", (data.email.strip(), username))
+    if data.new_password:
+        salt = secrets.token_hex(16)
+        password_hash = hash_password(data.new_password, salt)
+        c.execute("UPDATE users SET password_hash=?, salt=? WHERE username=?", (password_hash, salt, username))
+    conn.commit()
+    conn.close()
+    return {"status": "ok", "username": username}
+
+@app.delete("/admin/users/{username}")
+def delete_user(username: str, request: Request):
+    if not is_valid_admin_session(request):
+        raise HTTPException(status_code=401, detail="กรุณาเข้าสู่ระบบ admin ก่อน")
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("DELETE FROM users WHERE username=?", (username,))
+    conn.commit()
+    affected = c.rowcount
+    conn.close()
+    if affected == 0:
+        raise HTTPException(status_code=404, detail="ไม่พบผู้ใช้นี้")
+    return {"status": "deleted", "username": username}
+
 @app.get("/")
 def root():
     return {"message": "Threat Detection Server กำลังทำงาน 🛡️", "docs": "/docs"}
@@ -801,11 +969,14 @@ def login_page():
       <input type="password" id="login-password" autocomplete="current-password" required>
       <div class="status" id="login-status"></div>
       <button type="submit">ENTER  →</button>
+      <div style="text-align:right;margin-top:12px"><a href="/forgot-password" style="color:#7d8590;font-size:11px;font-family:'JetBrains Mono',monospace;text-decoration:none">ลืมรหัสผ่าน?</a></div>
     </form>
 
     <form id="registerForm" class="form">
       <label>USERNAME</label>
       <input type="text" id="reg-username" autocomplete="username" required>
+      <label>EMAIL</label>
+      <input type="email" id="reg-email" autocomplete="email" required>
       <label>PASSWORD</label>
       <input type="password" id="reg-password" autocomplete="new-password" required>
       <label>CONFIRM PASSWORD</label>
@@ -866,10 +1037,11 @@ document.getElementById('loginForm').addEventListener('submit', async function(e
 document.getElementById('registerForm').addEventListener('submit', async function(e) {
   e.preventDefault();
   const username = document.getElementById('reg-username').value.trim();
+  const email = document.getElementById('reg-email').value.trim();
   const password = document.getElementById('reg-password').value;
   const confirm = document.getElementById('reg-confirm').value;
   const status = document.getElementById('register-status');
-  if (!username || !password) return;
+  if (!username || !email || !password) return;
   if (password !== confirm) {
     status.className = 'status err';
     status.textContent = 'รหัสผ่านไม่ตรงกัน';
@@ -881,7 +1053,7 @@ document.getElementById('registerForm').addEventListener('submit', async functio
     const res = await fetch('/register', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({username, password})
+      body: JSON.stringify({username, email, password})
     });
     const data = await res.json();
     if (!res.ok) {
@@ -905,6 +1077,192 @@ document.getElementById('registerForm').addEventListener('submit', async functio
 </script>
 </body>
 </html>"""
+    return HTMLResponse(content=html)
+
+@app.get("/forgot-password")
+def forgot_password_page():
+    from fastapi.responses import HTMLResponse
+    html = """<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ลืมรหัสผ่าน — Threat Detection</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Sarabun:wght@300;400;600&display=swap" rel="stylesheet">
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body {
+    background:#0a0c10; color:#e6edf3; font-family:'Sarabun',sans-serif;
+    min-height:100vh; display:flex; align-items:center; justify-content:center;
+  }
+  .card {
+    background:#0f1318; border:1px solid #21262d; border-radius:12px;
+    padding:40px; width:380px; text-align:center;
+    border-top:3px solid #00d4aa;
+  }
+  .icon { font-size:36px; margin-bottom:8px; }
+  h1 { font-family:'JetBrains Mono',monospace; font-size:16px; color:#00d4aa; letter-spacing:1px; margin-bottom:4px; }
+  .sub { font-size:13px; color:#7d8590; margin-bottom:24px; }
+  label { display:block; text-align:left; font-family:'JetBrains Mono',monospace; font-size:11px; color:#7d8590; margin-bottom:6px; letter-spacing:1px; }
+  input {
+    width:100%; background:#161b22; border:1px solid #21262d; border-radius:6px;
+    padding:12px 14px; color:#e6edf3; font-family:'JetBrains Mono',monospace; font-size:14px;
+    outline:none; margin-bottom:16px; transition:border-color .2s;
+  }
+  input:focus { border-color:#00d4aa; }
+  button {
+    width:100%; padding:14px; border:none; border-radius:6px;
+    background:#00d4aa; color:#000; font-family:'JetBrains Mono',monospace;
+    font-size:13px; font-weight:700; letter-spacing:1px; cursor:pointer; transition:background .2s;
+  }
+  button:hover { background:#00f0c0; }
+  .status { font-family:'JetBrains Mono',monospace; font-size:12px; min-height:18px; margin-bottom:12px; text-align:left; }
+  .status.err { color:#f85149; }
+  .status.ok { color:#00d4aa; }
+  .back { display:block; margin-top:16px; color:#7d8590; font-size:11px; font-family:'JetBrains Mono',monospace; text-decoration:none; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <div class="icon">🔑</div>
+    <h1>ลืมรหัสผ่าน</h1>
+    <div class="sub">กรอกอีเมลที่ใช้สมัครสมาชิก เราจะส่งลิงก์กู้คืนรหัสผ่านให้</div>
+    <form id="forgotForm">
+      <label>EMAIL</label>
+      <input type="email" id="email" autocomplete="email" required autofocus>
+      <div class="status" id="status"></div>
+      <button type="submit">ส่งลิงก์กู้คืนรหัสผ่าน →</button>
+    </form>
+    <a href="/login" class="back">← กลับไปหน้าเข้าสู่ระบบ</a>
+  </div>
+<script>
+document.getElementById('forgotForm').addEventListener('submit', async function(e) {
+  e.preventDefault();
+  const email = document.getElementById('email').value.trim();
+  const status = document.getElementById('status');
+  const btn = e.target.querySelector('button');
+  if (!email) return;
+  status.className = 'status';
+  status.textContent = 'กำลังส่ง...';
+  try {
+    const res = await fetch('/forgot-password', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({email})
+    });
+    const data = await res.json();
+    status.className = 'status ok';
+    status.textContent = data.message || 'หากอีเมลนี้มีอยู่ในระบบ เราได้ส่งลิงก์กู้คืนรหัสผ่านไปแล้ว';
+    btn.disabled = true;
+  } catch(e) {
+    status.className = 'status err';
+    status.textContent = 'เกิดข้อผิดพลาด ลองใหม่อีกครั้ง';
+  }
+});
+</script>
+</body>
+</html>"""
+    return HTMLResponse(content=html)
+
+@app.get("/reset-password")
+def reset_password_page(token: str = ""):
+    from fastapi.responses import HTMLResponse
+    html = """<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ตั้งรหัสผ่านใหม่ — Threat Detection</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Sarabun:wght@300;400;600&display=swap" rel="stylesheet">
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body {
+    background:#0a0c10; color:#e6edf3; font-family:'Sarabun',sans-serif;
+    min-height:100vh; display:flex; align-items:center; justify-content:center;
+  }
+  .card {
+    background:#0f1318; border:1px solid #21262d; border-radius:12px;
+    padding:40px; width:380px; text-align:center;
+    border-top:3px solid #00d4aa;
+  }
+  .icon { font-size:36px; margin-bottom:8px; }
+  h1 { font-family:'JetBrains Mono',monospace; font-size:16px; color:#00d4aa; letter-spacing:1px; margin-bottom:4px; }
+  .sub { font-size:13px; color:#7d8590; margin-bottom:24px; }
+  label { display:block; text-align:left; font-family:'JetBrains Mono',monospace; font-size:11px; color:#7d8590; margin-bottom:6px; letter-spacing:1px; }
+  input {
+    width:100%; background:#161b22; border:1px solid #21262d; border-radius:6px;
+    padding:12px 14px; color:#e6edf3; font-family:'JetBrains Mono',monospace; font-size:14px;
+    outline:none; margin-bottom:16px; transition:border-color .2s;
+  }
+  input:focus { border-color:#00d4aa; }
+  button {
+    width:100%; padding:14px; border:none; border-radius:6px;
+    background:#00d4aa; color:#000; font-family:'JetBrains Mono',monospace;
+    font-size:13px; font-weight:700; letter-spacing:1px; cursor:pointer; transition:background .2s;
+  }
+  button:hover { background:#00f0c0; }
+  .status { font-family:'JetBrains Mono',monospace; font-size:12px; min-height:18px; margin-bottom:12px; text-align:left; }
+  .status.err { color:#f85149; }
+  .status.ok { color:#00d4aa; }
+  .back { display:block; margin-top:16px; color:#7d8590; font-size:11px; font-family:'JetBrains Mono',monospace; text-decoration:none; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <div class="icon">🔒</div>
+    <h1>ตั้งรหัสผ่านใหม่</h1>
+    <div class="sub">กรอกรหัสผ่านใหม่ของคุณ</div>
+    <form id="resetForm">
+      <input type="hidden" id="token" value="TOKEN_PLACEHOLDER">
+      <label>รหัสผ่านใหม่</label>
+      <input type="password" id="new-password" autocomplete="new-password" required>
+      <label>ยืนยันรหัสผ่านใหม่</label>
+      <input type="password" id="confirm-password" autocomplete="new-password" required>
+      <div class="status" id="status"></div>
+      <button type="submit">ตั้งรหัสผ่านใหม่ →</button>
+    </form>
+    <a href="/login" class="back">← กลับไปหน้าเข้าสู่ระบบ</a>
+  </div>
+<script>
+document.getElementById('resetForm').addEventListener('submit', async function(e) {
+  e.preventDefault();
+  const token = document.getElementById('token').value;
+  const newPassword = document.getElementById('new-password').value;
+  const confirmPassword = document.getElementById('confirm-password').value;
+  const status = document.getElementById('status');
+  const btn = e.target.querySelector('button');
+  if (!newPassword) return;
+  if (newPassword !== confirmPassword) {
+    status.className = 'status err';
+    status.textContent = 'รหัสผ่านไม่ตรงกัน';
+    return;
+  }
+  status.className = 'status';
+  status.textContent = 'กำลังบันทึก...';
+  try {
+    const res = await fetch('/reset-password', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({token, new_password: newPassword})
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      status.className = 'status err';
+      status.textContent = data.detail || 'เกิดข้อผิดพลาด';
+      return;
+    }
+    status.className = 'status ok';
+    status.textContent = '✓ เปลี่ยนรหัสผ่านสำเร็จแล้ว — กำลังไปหน้าเข้าสู่ระบบ...';
+    btn.disabled = true;
+    setTimeout(() => window.location.href = '/login', 1500);
+  } catch(e) {
+    status.className = 'status err';
+    status.textContent = 'เกิดข้อผิดพลาด ลองใหม่อีกครั้ง';
+  }
+});
+</script>
+</body>
+</html>""".replace("TOKEN_PLACEHOLDER", token)
     return HTMLResponse(content=html)
 
 # ===== Background: refresh threat feed ทุก 24 ชม. =====
