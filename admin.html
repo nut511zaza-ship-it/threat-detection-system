@@ -231,6 +231,7 @@
     </div>
 
     <div id="tab-manage-users" class="panel">
+      <div id="duplicate-emails-warning"></div>
       <div class="section">
         <div class="section-header">
           <span class="section-title">🛠️ Manage Users</span>
@@ -269,7 +270,7 @@ function switchTab(name, el) {
   el.classList.add('active');
   document.getElementById('tab-' + name).classList.add('active');
   if (name === 'dashboard') loadDashboard();
-  if (name === 'blacklist') { loadBlacklist(); loadThreatFeed(); }
+  if (name === 'blacklist') { loadBlacklist().then(loadThreatFeed); }
   if (name === 'whitelist') loadWhitelist();
   if (name === 'users') loadUsers();
   if (name === 'manage-users') loadManageUsers();
@@ -339,19 +340,116 @@ async function loadDashboard() {
   }
 }
 
+let blacklistSortState = { manual: { col: null, dir: 1 }, urlhaus: { col: null, dir: 1 } };
+let blacklistPageState = { manual: 1, urlhaus: 1, feed: 1 };
+let blacklistRawData = [];
+const PAGE_SIZE = 10;
+
+function paginate(rows, group) {
+  const page = blacklistPageState[group] || 1;
+  const totalPages = Math.max(1, Math.ceil(rows.length / PAGE_SIZE));
+  const clampedPage = Math.min(page, totalPages);
+  blacklistPageState[group] = clampedPage;
+  const start = (clampedPage - 1) * PAGE_SIZE;
+  return {
+    pageRows: rows.slice(start, start + PAGE_SIZE),
+    currentPage: clampedPage,
+    totalPages,
+    totalItems: rows.length
+  };
+}
+
+function renderPager(group, totalPages, currentPage, onPageChangeFn) {
+  if (totalPages <= 1) return '';
+  return `
+    <div style="display:flex;align-items:center;justify-content:center;gap:8px;padding:10px;border-top:1px solid var(--border)">
+      <button class="btn btn-sm" ${currentPage<=1?'disabled style="opacity:0.4"':''} onclick="${onPageChangeFn}('${group}', ${currentPage - 1})">← ก่อนหน้า</button>
+      <span style="font-size:12px;color:var(--text2)">หน้า ${currentPage} / ${totalPages}</span>
+      <button class="btn btn-sm" ${currentPage>=totalPages?'disabled style="opacity:0.4"':''} onclick="${onPageChangeFn}('${group}', ${currentPage + 1})">ถัดไป →</button>
+    </div>`;
+}
+
 async function loadBlacklist() {
   const data = await api('/blacklist');
+  blacklistRawData = data;
+  renderBlacklistSections();
+}
+
+function renderBlacklistSections() {
+  const data = blacklistRawData;
   if (!data.length) { document.getElementById('blacklist-table').innerHTML = '<div class="empty">ยังไม่มี domain ใน Blacklist</div>'; return; }
-  document.getElementById('blacklist-table').innerHTML = `
+
+  const fromUrlhaus = data.filter(d => d.reason === 'URLhaus threat feed');
+  const manual = data.filter(d => d.reason !== 'URLhaus threat feed');
+
+  function sortRows(rows, state) {
+    if (!state.col) return rows;
+    const sorted = [...rows].sort((a, b) => {
+      let av = (a[state.col] || '').toString().toLowerCase();
+      let bv = (b[state.col] || '').toString().toLowerCase();
+      if (av < bv) return -1 * state.dir;
+      if (av > bv) return 1 * state.dir;
+      return 0;
+    });
+    return sorted;
+  }
+
+  function arrow(group, col) {
+    const state = blacklistSortState[group];
+    if (state.col !== col) return '';
+    return state.dir === 1 ? ' ▲' : ' ▼';
+  }
+
+  function renderTable(rows, group) {
+    const state = blacklistSortState[group];
+    const sorted = sortRows(rows, state);
+    if (!sorted.length) return '<div class="empty" style="padding:12px 20px;font-size:12px">ไม่มีรายการ</div>';
+    const { pageRows, currentPage, totalPages } = paginate(sorted, group);
+    return `
     <table>
-      <thead><tr><th>Domain</th><th>Reason</th><th>Added At</th><th>Action</th></tr></thead>
-      <tbody>${data.map(d => `<tr>
+      <thead><tr>
+        <th style="cursor:pointer;user-select:none" onclick="toggleBlacklistSort('${group}','domain')">Domain${arrow(group,'domain')}</th>
+        <th style="cursor:pointer;user-select:none" onclick="toggleBlacklistSort('${group}','reason')">Reason${arrow(group,'reason')}</th>
+        <th style="cursor:pointer;user-select:none" onclick="toggleBlacklistSort('${group}','added_at')">Added At${arrow(group,'added_at')}</th>
+        <th>Action</th>
+      </tr></thead>
+      <tbody>${pageRows.map(d => `<tr>
         <td>${d.domain}</td>
         <td style="color:var(--text2)">${d.reason||'—'}</td>
         <td style="color:var(--text2)">${d.added_at}</td>
         <td><button class="btn btn-danger btn-sm" onclick="deleteBlacklist('${d.domain}')">ลบ</button></td>
       </tr>`).join('')}</tbody>
-    </table>`;
+    </table>
+    ${renderPager(group, totalPages, currentPage, 'changeBlacklistPage')}`;
+  }
+
+  document.getElementById('blacklist-table').innerHTML = `
+    <div style="padding:10px 20px 4px;font-size:12px;font-weight:600;color:var(--text2);border-top:1px solid var(--border)">
+      ✏️ เพิ่มเอง (${manual.length})
+    </div>
+    ${renderTable(manual, 'manual')}
+    <div style="padding:10px 20px 4px;font-size:12px;font-weight:600;color:var(--text2);border-top:1px solid var(--border)">
+      ☁️ มาจาก URLhaus Feed (${fromUrlhaus.length})
+    </div>
+    ${renderTable(fromUrlhaus, 'urlhaus')}
+  `;
+}
+
+function toggleBlacklistSort(group, col) {
+  const state = blacklistSortState[group];
+  if (state.col === col) {
+    state.dir *= -1;
+  } else {
+    state.col = col;
+    state.dir = 1;
+  }
+  blacklistPageState[group] = 1;
+  renderBlacklistSections();
+}
+
+function changeBlacklistPage(group, newPage) {
+  blacklistPageState[group] = newPage;
+  renderBlacklistSections();
 }
 
 async function addBlacklist() {
@@ -377,20 +475,32 @@ async function loadThreatFeed() {
     document.getElementById('threat-feed-updated').textContent = '';
     return;
   }
+  const blacklistedDomains = new Set(blacklistRawData.map(d => d.domain));
+  const { pageRows, currentPage, totalPages } = paginate(data, 'feed');
   document.getElementById('threat-feed-table').innerHTML = `
     <table>
       <thead><tr><th>Domain</th><th>Action</th></tr></thead>
-      <tbody>${data.map(d => `<tr>
-        <td style="font-size:12px">${d.domain}</td>
-        <td><button class="btn btn-primary btn-sm" onclick="addToBlacklistFromFeed('${d.domain}')">+ เพิ่ม</button></td>
-      </tr>`).join('')}</tbody>
-    </table>`;
+      <tbody>${pageRows.map(d => {
+        const added = blacklistedDomains.has(d.domain);
+        return `<tr style="${added ? 'background:rgba(0,212,170,0.08)' : ''}">
+        <td style="font-size:12px;${added ? 'color:var(--accent)' : ''}">${d.domain}</td>
+        <td>${added
+          ? '<button class="btn btn-sm" disabled style="opacity:0.6;cursor:default">✓ เพิ่มแล้ว</button>'
+          : `<button class="btn btn-primary btn-sm" onclick="addToBlacklistFromFeed('${d.domain}')">+ เพิ่ม</button>`}</td>
+      </tr>`}).join('')}</tbody>
+    </table>
+    ${renderPager('feed', totalPages, currentPage, 'changeFeedPage')}`;
   document.getElementById('threat-feed-updated').textContent = 'อัปเดตล่าสุด: ' + (data[0].fetched_at || '—');
+}
+
+function changeFeedPage(group, newPage) {
+  blacklistPageState.feed = newPage;
+  loadThreatFeed();
 }
 
 async function addToBlacklistFromFeed(domain) {
   await api('/blacklist', 'POST', {domain, reason: 'URLhaus threat feed'});
-  loadBlacklist();
+  await loadBlacklist();
   loadThreatFeed();
   loadDashboard();
 }
@@ -440,6 +550,7 @@ async function loadUsers() {
 }
 
 async function loadManageUsers() {
+  loadDuplicateEmailsWarning();
   const users = await api('/admin/users-full');
   if (!users || !users.length) {
     document.getElementById('manage-users-table').innerHTML = '<div class="empty">ยังไม่มี user</div>';
@@ -459,6 +570,30 @@ async function loadManageUsers() {
         </td>
       </tr>`).join('')}</tbody>
     </table>`;
+}
+
+async function loadDuplicateEmailsWarning() {
+  const dups = await api('/admin/duplicate-emails');
+  const el = document.getElementById('duplicate-emails-warning');
+  if (!dups || !dups.length) { el.innerHTML = ''; return; }
+  el.innerHTML = `
+    <div class="section" style="border:1px solid #f85149;margin-bottom:16px">
+      <div class="section-header">
+        <span class="section-title" style="color:#f85149">⚠️ พบอีเมลซ้ำกัน ${dups.length} รายการ</span>
+      </div>
+      <div style="padding:4px 20px 16px;font-size:12px;color:var(--text2)">
+        บัญชีเหล่านี้ใช้อีเมลเดียวกัน ทำให้ระบบ "ลืมรหัสผ่าน" อาจส่งลิงก์ไปยัง username ที่ไม่ตรงกับที่ user ต้องการ
+        แนะนำให้แก้ไอเมลให้ไม่ซ้ำกัน หรือลบบัญชีที่ไม่ใช้แล้ว
+      </div>
+      <table>
+        <thead><tr><th>Email</th><th>Username ที่ใช้ร่วมกัน</th><th>จำนวน</th></tr></thead>
+        <tbody>${dups.map(d => `<tr>
+          <td style="font-size:12px">${d.email}</td>
+          <td style="font-family:var(--mono);font-size:12px">${d.usernames}</td>
+          <td style="font-size:12px;color:#f85149">${d.count}</td>
+        </tr>`).join('')}</tbody>
+      </table>
+    </div>`;
 }
 
 async function editUserEmail(username, currentEmail) {

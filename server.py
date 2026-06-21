@@ -258,7 +258,7 @@ def is_valid_admin_session(request: Request) -> bool:
 def register(data: AuthRequest):
     username = data.username.strip()
     password = data.password
-    email = data.email.strip()
+    email = data.email.strip().lower()
     if not username or not password:
         raise HTTPException(status_code=400, detail="กรุณากรอกชื่อผู้ใช้และรหัสผ่าน")
     if not email:
@@ -270,6 +270,11 @@ def register(data: AuthRequest):
     if c.fetchone():
         conn.close()
         raise HTTPException(status_code=400, detail="มีชื่อผู้ใช้นี้แล้ว")
+
+    c.execute("SELECT id FROM users WHERE email=?", (email,))
+    if c.fetchone():
+        conn.close()
+        raise HTTPException(status_code=400, detail="อีเมลนี้มีบัญชีผู้ใช้อยู่แล้ว กรุณาใช้อีเมลอื่น หรือกู้คืนรหัสผ่านของบัญชีเดิม")
 
     salt = secrets.token_hex(16)
     password_hash = hash_password(password, salt)
@@ -306,7 +311,7 @@ def send_email(to_email: str, subject: str, body: str) -> bool:
 
 @app.post("/forgot-password")
 def forgot_password(data: ForgotPasswordRequest):
-    email = data.email.strip()
+    email = data.email.strip().lower()
     if not email:
         raise HTTPException(status_code=400, detail="กรุณากรอกอีเมล")
 
@@ -853,6 +858,23 @@ def get_users_full(request: Request):
     rows = c.fetchall()
     conn.close()
     return [{"username": r[0], "email": r[1] or "", "created_at": r[2]} for r in rows]
+
+@app.get("/admin/duplicate-emails")
+def get_duplicate_emails(request: Request):
+    """หา user ที่ใช้อีเมลซ้ำกัน (เผื่อมีอยู่ก่อนระบบบังคับ unique email)
+    เพื่อให้ admin ไปจัดการ (แก้ไอเมล/ลบ) เองผ่าน Manage Users"""
+    if not is_valid_admin_session(request):
+        raise HTTPException(status_code=401, detail="กรุณาเข้าสู่ระบบ admin ก่อน")
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("""SELECT email, GROUP_CONCAT(username, ', '), COUNT(*) as cnt
+                 FROM users
+                 WHERE email IS NOT NULL AND email != ''
+                 GROUP BY email
+                 HAVING cnt > 1""")
+    rows = c.fetchall()
+    conn.close()
+    return [{"email": r[0], "usernames": r[1], "count": r[2]} for r in rows]
 
 @app.put("/admin/users/{username}")
 def edit_user(username: str, data: UserEditRequest, request: Request):

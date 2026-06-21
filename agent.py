@@ -151,24 +151,64 @@ def open_url(url):
 def install_open_login_task(login_url):
     """สร้าง Task ที่รันด้วยสิทธิ์ผู้ใช้ปกติ (ไม่ใช่ admin) สำหรับเปิด browser
     เพราะ process สิทธิ์ admin (จาก Task Scheduler /rl highest) ถูก UIPI บล็อก
-    ไม่ให้เปิดหน้าต่างใน session ของ user ปกติได้"""
+    ไม่ให้เปิดหน้าต่างใน session ของ user ปกติได้
+    ใช้ XML เพื่อปิด battery restriction เหมือน install_task_scheduler()
+    (schtasks /create ธรรมดาจะติ๊ก 'Start only on AC power' ให้โดย default)"""
     subprocess.run(
         ["schtasks", "/delete", "/tn", "ThreatDetectionOpenLogin", "/f"],
         capture_output=True
     )
-    tr = f"cmd /c start {login_url}"
-    result = subprocess.run([
-        "schtasks", "/create",
-        "/tn", "ThreatDetectionOpenLogin",
-        "/tr", tr,
-        "/sc", "onlogon",
-        "/rl", "limited",
-        "/f"
-    ], capture_output=True, text=True)
-    if result.returncode == 0:
-        log("ติดตั้ง ThreatDetectionOpenLogin task สำเร็จ")
-    else:
-        log(f"ติดตั้ง ThreatDetectionOpenLogin task error: {result.stderr}")
+    task_xml = f'''<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <Triggers>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <IdleSettings>
+      <StopOnIdleEnd>false</StopOnIdleEnd>
+      <RestartOnIdle>false</RestartOnIdle>
+    </IdleSettings>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <Hidden>false</Hidden>
+    <RunOnlyIfIdle>false</RunOnlyIfIdle>
+    <ExecutionTimeLimit>PT1H</ExecutionTimeLimit>
+    <Priority>7</Priority>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>cmd.exe</Command>
+      <Arguments>/c start {login_url}</Arguments>
+    </Exec>
+  </Actions>
+</Task>'''
+    xml_path = os.path.join(os.environ.get("TEMP", "C:\\"), "threatdetection_openlogin_task.xml")
+    try:
+        with open(xml_path, "w", encoding="utf-16") as f:
+            f.write(task_xml)
+        result = subprocess.run([
+            "schtasks", "/create",
+            "/tn", "ThreatDetectionOpenLogin",
+            "/xml", xml_path,
+            "/f"
+        ], capture_output=True, text=True)
+        if result.returncode == 0:
+            log("ติดตั้ง ThreatDetectionOpenLogin task สำเร็จ (ปิด battery restriction แล้ว)")
+        else:
+            log(f"ติดตั้ง ThreatDetectionOpenLogin task error: {result.stderr}")
+    except Exception as e:
+        log(f"สร้าง ThreatDetectionOpenLogin task ด้วย XML ไม่ได้: {e}")
 
 
 def open_login_page():
@@ -190,19 +230,64 @@ def install_task_scheduler(self_path):
         capture_output=True
     )
     log("ติดตั้ง Task Scheduler...")
-    task_run = f'\\"{self_path}\\"'
-    result = subprocess.run([
-        "schtasks", "/create",
-        "/tn", "ThreatDetectionAgent",
-        "/tr", task_run,
-        "/sc", "onlogon",
-        "/rl", "highest",
-        "/it", "/f"
-    ], capture_output=True, text=True)
-    if result.returncode == 0:
-        log("ติดตั้ง Task Scheduler สำเร็จ")
-    else:
-        log(f"Task Scheduler error: {result.stderr}")
+
+    # ใช้ XML แทน schtasks /create ตรงๆ เพราะ command-line ไม่มี flag ปิด
+    # battery restriction ได้ — ค่า default ของ schtasks คือ "ไม่รันถ้าใช้แบตเตอรี่ล้วน"
+    # และ "หยุดทันทีถ้าสลับมาใช้แบตเตอรี่" ซึ่งทำให้ agent ไม่ทำงานตอนไม่เสียบสายชาร์จ
+    task_xml = f'''<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <Triggers>
+    <LogonTrigger>
+      <Enabled>true</Enabled>
+    </LogonTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>HighestAvailable</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <IdleSettings>
+      <StopOnIdleEnd>false</StopOnIdleEnd>
+      <RestartOnIdle>false</RestartOnIdle>
+    </IdleSettings>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <Hidden>false</Hidden>
+    <RunOnlyIfIdle>false</RunOnlyIfIdle>
+    <ExecutionTimeLimit>PT72H</ExecutionTimeLimit>
+    <Priority>7</Priority>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>{self_path}</Command>
+    </Exec>
+  </Actions>
+</Task>'''
+
+    xml_path = os.path.join(os.environ.get("TEMP", "C:\\"), "threatdetection_task.xml")
+    try:
+        with open(xml_path, "w", encoding="utf-16") as f:
+            f.write(task_xml)
+        result = subprocess.run([
+            "schtasks", "/create",
+            "/tn", "ThreatDetectionAgent",
+            "/xml", xml_path,
+            "/f"
+        ], capture_output=True, text=True)
+        if result.returncode == 0:
+            log("ติดตั้ง Task Scheduler สำเร็จ (ปิด battery restriction แล้ว)")
+        else:
+            log(f"Task Scheduler error: {result.stderr}")
+    except Exception as e:
+        log(f"สร้าง Task Scheduler ด้วย XML ไม่ได้: {e}")
 
 
 # ===== Local callback server: รับ username จากหน้า web login =====
