@@ -208,7 +208,7 @@ class DomainEntry(BaseModel):
     reason: str = ""
 
 class AuthRequest(BaseModel):
-    username: str
+    username: str = ""
     password: str
     email: str = ""
 
@@ -378,20 +378,20 @@ def reset_password(data: ResetPasswordRequest):
 
 @app.post("/login")
 def login(data: AuthRequest):
-    username = data.username.strip()
+    email = data.email.strip().lower()
     password = data.password
-    if not username or not password:
-        raise HTTPException(status_code=400, detail="กรุณากรอกชื่อผู้ใช้และรหัสผ่าน")
+    if not email or not password:
+        raise HTTPException(status_code=400, detail="กรุณากรอกอีเมลและรหัสผ่าน")
 
     conn = get_conn()
     c = conn.cursor()
-    c.execute("SELECT password_hash, salt FROM users WHERE username=?", (username,))
+    c.execute("SELECT username, password_hash, salt FROM users WHERE email=?", (email,))
     row = c.fetchone()
     if not row:
         conn.close()
-        raise HTTPException(status_code=401, detail="ไม่พบชื่อผู้ใช้นี้ กรุณาสมัครสมาชิกก่อน")
+        raise HTTPException(status_code=401, detail="ไม่พบบัญชีที่ใช้อีเมลนี้ กรุณาสมัครสมาชิกก่อน")
 
-    stored_hash, salt = row
+    username, stored_hash, salt = row
     if hash_password(password, salt) != stored_hash:
         conn.close()
         raise HTTPException(status_code=401, detail="รหัสผ่านไม่ถูกต้อง")
@@ -984,8 +984,8 @@ def login_page():
     </div>
 
     <form id="loginForm" class="form active">
-      <label>USERNAME</label>
-      <input type="text" id="login-username" autocomplete="username" required>
+      <label>EMAIL</label>
+      <input type="email" id="login-email" autocomplete="email" required>
       <label>PASSWORD</label>
       <input type="password" id="login-password" autocomplete="current-password" required>
       <div class="status" id="login-status"></div>
@@ -1026,18 +1026,18 @@ async function notifyAgent(username) {
 
 document.getElementById('loginForm').addEventListener('submit', async function(e) {
   e.preventDefault();
-  const username = document.getElementById('login-username').value.trim();
+  const email = document.getElementById('login-email').value.trim();
   const password = document.getElementById('login-password').value;
   const status = document.getElementById('login-status');
   const btn = e.target.querySelector('button');
-  if (!username || !password) return;
+  if (!email || !password) return;
   status.className = 'status';
   status.textContent = 'กำลังเข้าสู่ระบบ...';
   try {
     const res = await fetch('/login', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({username, password})
+      body: JSON.stringify({email, password})
     });
     const data = await res.json();
     if (!res.ok) {
@@ -1045,7 +1045,7 @@ document.getElementById('loginForm').addEventListener('submit', async function(e
       status.textContent = data.detail || 'เข้าสู่ระบบไม่สำเร็จ';
       return;
     }
-    await notifyAgent(username);
+    await notifyAgent(data.username);
     status.className = 'status ok';
     status.textContent = '✓ เข้าสู่ระบบสำเร็จ — คุณสามารถปิดหน้านี้ได้';
     btn.disabled = true;
@@ -1086,7 +1086,7 @@ document.getElementById('registerForm').addEventListener('submit', async functio
     status.textContent = '✓ สมัครสมาชิกสำเร็จ — กำลังไปหน้าเข้าสู่ระบบ...';
     setTimeout(() => {
       switchForm('login');
-      document.getElementById('login-username').value = username;
+      document.getElementById('login-email').value = email;
       document.getElementById('login-password').focus();
       status.textContent = '';
     }, 1200);
