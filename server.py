@@ -19,6 +19,8 @@ try:
 except ImportError:
     pass
 import threading
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import Response as _StarletteResponse
 
 # ===== VirusTotal API Key =====
 # ตั้งค่าผ่าน environment variable VT_API_KEY (ดูตัวอย่างใน .env.example)
@@ -33,6 +35,81 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ===== Dark / Light theme middleware =====
+_THEME_HEAD = """\
+<style>
+[data-theme=light]{--bg:#f4f6f8;--bg2:#fff;--bg3:#eaedf0;--border:#d0d7de;--text:#1f2328;--text2:#636c76;--text3:#9ca3af}
+[data-theme=light] body{background:#f4f6f8!important;color:#1f2328!important}
+[data-theme=light] body::before{background-image:linear-gradient(rgba(0,150,120,.07) 1px,transparent 1px),linear-gradient(90deg,rgba(0,150,120,.07) 1px,transparent 1px)!important}
+[data-theme=light] header{background:rgba(244,246,248,.93)!important;border-color:#d0d7de!important}
+[data-theme=light] .tabs{border-color:#d0d7de!important}
+[data-theme=light] .tab{color:#636c76!important}
+[data-theme=light] .tab:hover{color:#1f2328!important}
+[data-theme=light] .tab.active{color:#00d4aa!important;border-bottom-color:#00d4aa!important}
+[data-theme=light] .card{background:#fff!important;border-color:#d0d7de!important}
+[data-theme=light] input{background:#eaedf0!important;border-color:#d0d7de!important;color:#1f2328!important}
+[data-theme=light] input::placeholder{color:#9ca3af!important}
+[data-theme=light] label{color:#636c76!important}
+[data-theme=light] .sub{color:#636c76!important}
+[data-theme=light] .notice{background:#fffbf0!important}
+[data-theme=light] .notice-title{color:#1f2328!important}
+[data-theme=light] .section{background:#fff!important;border-color:#d0d7de!important}
+[data-theme=light] .section-header{border-color:#d0d7de!important}
+[data-theme=light] .section-title{color:#1f2328!important}
+[data-theme=light] .stat-card{background:#fff!important;border-color:#d0d7de!important}
+[data-theme=light] .stat-value{color:#1f2328!important}
+[data-theme=light] .stat-label{color:#636c76!important}
+[data-theme=light] .stat-sub{color:#9ca3af!important}
+[data-theme=light] .add-form{background:#eaedf0!important;border-color:#d0d7de!important}
+[data-theme=light] .add-form input{background:#fff!important}
+[data-theme=light] th{background:#eaedf0!important;color:#636c76!important}
+[data-theme=light] td{color:#1f2328!important;border-bottom-color:#d0d7de!important}
+[data-theme=light] tr:hover td{background:rgba(0,0,0,.04)!important}
+[data-theme=light] .user-ip{color:#1f2328!important}
+[data-theme=light] .user-ip-icon{background:#eaedf0!important}
+[data-theme=light] .user-time{color:#636c76!important}
+[data-theme=light] .btn-refresh{border-color:#d0d7de!important;color:#636c76!important;background:#fff!important}
+[data-theme=light] .btn-refresh:hover{border-color:#00d4aa!important;color:#00d4aa!important}
+[data-theme=light] .switcher button{background:#eaedf0!important;color:#636c76!important}
+[data-theme=light] .switcher button.active{background:#00d4aa!important;color:#000!important}
+[data-theme=light] .loading{color:#636c76!important}
+[data-theme=light] .empty{color:#9ca3af!important}
+[data-theme=light] .back{color:#636c76!important}
+[data-theme=light] .logo-sub{color:#636c76!important}
+[data-theme=light] .status-dot span{color:#636c76!important}
+#__td-btn{position:fixed;bottom:22px;right:22px;z-index:9999;width:42px;height:42px;border-radius:50%;border:1px solid var(--border,#21262d);background:var(--bg2,#0f1318);font-size:20px;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 2px 10px rgba(0,0,0,.3);transition:transform .15s,box-shadow .15s;padding:0;line-height:1}
+#__td-btn:hover{transform:scale(1.1);box-shadow:0 4px 18px rgba(0,0,0,.4)}
+[data-theme=light] #__td-btn{border-color:#d0d7de;background:#fff;box-shadow:0 2px 10px rgba(0,0,0,.12)}
+</style>
+<script>(function(){var t=localStorage.getItem('td-theme')||'dark';document.documentElement.setAttribute('data-theme',t)})();</script>
+"""
+
+_THEME_BODY = """\
+<button id="__td-btn" title="สลับธีมมืด/สว่าง" onclick="(function(){var c=document.documentElement.getAttribute('data-theme'),n=c==='dark'?'light':'dark';document.documentElement.setAttribute('data-theme',n);localStorage.setItem('td-theme',n);document.getElementById('__td-btn').textContent=n==='dark'?'🌙':'☀️'})()"></button>
+<script>document.getElementById('__td-btn').textContent=(localStorage.getItem('td-theme')||'dark')==='dark'?'🌙':'☀️';</script>
+"""
+
+class ThemeMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request, call_next):
+        response = await call_next(request)
+        ct = response.headers.get('content-type', '')
+        if 'text/html' not in ct:
+            return response
+        body = b''
+        async for chunk in response.body_iterator:
+            body += chunk
+        head_b = _THEME_HEAD.encode('utf-8')
+        body_b = _THEME_BODY.encode('utf-8')
+        body = body.replace(b'</head>', head_b + b'</head>', 1)
+        body = body.replace(b'</body>', body_b + b'</body>', 1)
+        headers = dict(response.headers)
+        headers.pop('transfer-encoding', None)
+        headers['content-length'] = str(len(body))
+        return _StarletteResponse(content=body, status_code=response.status_code, headers=headers, media_type='text/html; charset=utf-8')
+
+app.add_middleware(ThemeMiddleware)
+# ============================================
 
 DB_PATH = "calculator.db"
 
@@ -110,6 +187,15 @@ def init_db():
         token TEXT PRIMARY KEY,
         username TEXT NOT NULL,
         created_at TEXT NOT NULL
+    )""")
+    # การพยายามเข้าเว็บที่ถูกบล็อก (agent รายงานผ่าน POST /attempt) — ใช้แจ้งเตือน admin
+    c.execute("""CREATE TABLE IF NOT EXISTS block_attempts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT NOT NULL,
+        domain TEXT NOT NULL,
+        protocol TEXT NOT NULL,
+        reason TEXT,
+        attempted_at TEXT NOT NULL
     )""")
     conn.commit()
     conn.close()
@@ -206,6 +292,11 @@ class DomainCheck(BaseModel):
 class DomainEntry(BaseModel):
     domain: str
     reason: str = ""
+
+class AttemptReport(BaseModel):
+    domain: str
+    username: str = ""
+    protocol: str = "http"
 
 class AuthRequest(BaseModel):
     username: str = ""
@@ -492,6 +583,163 @@ def check_domain(data: DomainCheck):
     conn.close()
 
     return {"status": vt_status, "domain": domain, "reason": vt_reason}
+
+# ===== Block Page + แจ้งเตือน admin เมื่อผู้ใช้พยายามเข้าเว็บที่ถูกบล็อก =====
+ATTEMPT_DEDUP_SECONDS = 30
+
+def _normalize_domain(domain: str) -> str:
+    return (domain or "").strip().lower().rstrip(".")[:253]
+
+def _find_blacklist(c, domain: str):
+    """คืน (domain ใน blacklist, reason) ถ้าโดเมน (หรือแบบตัด www.) อยู่ใน blacklist"""
+    candidates = [domain]
+    if domain.startswith("www."):
+        candidates.append(domain[4:])
+    for d in candidates:
+        c.execute("SELECT domain, reason FROM blacklist WHERE domain=?", (d,))
+        row = c.fetchone()
+        if row:
+            return row
+    return None
+
+@app.post("/attempt")
+def report_attempt(data: AttemptReport):
+    domain = _normalize_domain(data.domain)
+    username = data.username.strip()[:100] or "(ยังไม่ login)"
+    protocol = data.protocol if data.protocol in ("http", "https") else "http"
+    if not domain:
+        raise HTTPException(status_code=400, detail="กรุณาระบุโดเมน")
+
+    conn = get_conn()
+    c = conn.cursor()
+    row = _find_blacklist(c, domain)
+    if not row:
+        # รับเฉพาะโดเมนที่อยู่ใน blacklist จริง กันคนยิงข้อมูลขยะเข้ามา
+        conn.close()
+        return {"status": "ignored", "domain": domain}
+    domain, reason = row
+
+    now = datetime.now()
+    timestamp = now.strftime("%Y-%m-%d %H:%M:%S")
+    since = datetime.fromtimestamp(now.timestamp() - ATTEMPT_DEDUP_SECONDS).strftime("%Y-%m-%d %H:%M:%S")
+    c.execute("SELECT id FROM block_attempts WHERE username=? AND domain=? AND attempted_at>=?",
+              (username, domain, since))
+    if c.fetchone():
+        conn.close()
+        return {"status": "duplicate", "domain": domain}
+
+    c.execute("INSERT INTO block_attempts (username,domain,protocol,reason,attempted_at) VALUES (?,?,?,?,?)",
+              (username, domain, protocol, reason or "", timestamp))
+    conn.commit()
+    new_id = c.lastrowid
+    conn.close()
+    return {"status": "ok", "id": new_id}
+
+@app.get("/blocked")
+def blocked_page(domain: str = ""):
+    from fastapi.responses import HTMLResponse
+    from html import escape
+    domain = _normalize_domain(domain)
+    reason = ""
+    if domain:
+        conn = get_conn()
+        row = _find_blacklist(conn.cursor(), domain)
+        conn.close()
+        if row:
+            domain, reason = row
+    reason_text = reason or "อยู่ในรายการเว็บไซต์อันตราย (Blacklist)"
+    now = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+    html = """<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="robots" content="noindex">
+<title>เว็บไซต์นี้ถูกบล็อก — Threat Detection</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Sarabun:wght@300;400;600&display=swap" rel="stylesheet">
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body {
+    background:#0a0c10; color:#e6edf3; font-family:'Sarabun',sans-serif;
+    min-height:100vh; display:flex; align-items:center; justify-content:center; padding:16px;
+  }
+  .card {
+    background:#0f1318; border:1px solid #21262d; border-radius:12px;
+    padding:40px 36px; width:100%; max-width:520px; text-align:center;
+    border-top:3px solid #f85149;
+  }
+  .icon { font-size:44px; margin-bottom:10px; }
+  h1 { font-size:24px; font-weight:600; color:#f85149; margin-bottom:6px; }
+  .sub { font-size:14px; color:#7d8590; margin-bottom:24px; }
+  .domain {
+    font-family:'JetBrains Mono',monospace; font-size:15px; font-weight:600;
+    background:rgba(248,81,73,.1); color:#f85149; border:1px solid rgba(248,81,73,.35);
+    border-radius:6px; padding:10px 14px; margin-bottom:20px; word-break:break-all;
+  }
+  .row { display:flex; justify-content:space-between; align-items:baseline; gap:16px; text-align:left;
+         font-size:14px; padding:10px 0; border-bottom:1px solid #21262d; }
+  .row:last-of-type { border-bottom:none; }
+  .row .k { color:#7d8590; flex-shrink:0; }
+  .row .v { text-align:right; }
+  .note { margin-top:22px; font-size:13px; color:#7d8590; line-height:1.7; }
+  .brand { margin-top:22px; font-family:'JetBrains Mono',monospace; font-size:11px; color:#00d4aa; letter-spacing:1px; }
+  [data-theme=light] body .card { border-top-color:#f85149!important; }
+  [data-theme=light] .domain { background:rgba(248,81,73,.08)!important; }
+  [data-theme=light] .row { border-color:#d0d7de!important; }
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="icon">🚫</div>
+  <h1>เว็บไซต์นี้ถูกบล็อก</h1>
+  <div class="sub">ระบบตรวจพบว่าเว็บไซต์ที่คุณพยายามเข้าอาจเป็นอันตราย</div>
+  __DOMAIN_BLOCK__
+  <div class="row"><span class="k">สาเหตุ</span><span class="v">__REASON__</span></div>
+  <div class="row"><span class="k">เวลา</span><span class="v">__TIME__</span></div>
+  <div class="note">
+    การเข้าถึงถูกระงับเพื่อความปลอดภัยของเครื่องและข้อมูลของคุณ<br>
+    ระบบได้บันทึกเหตุการณ์นี้และแจ้งผู้ดูแลระบบแล้ว<br>
+    หากคิดว่าเป็นความผิดพลาด กรุณาติดต่อผู้ดูแลระบบ
+  </div>
+  <div class="brand">🛡️ THREAT DETECTION SYSTEM</div>
+</div>
+</body>
+</html>"""
+    domain_block = f'<div class="domain">{escape(domain)}</div>' if domain else ""
+    html = (html.replace("__DOMAIN_BLOCK__", domain_block)
+                .replace("__REASON__", escape(reason_text))
+                .replace("__TIME__", now))
+    return HTMLResponse(content=html, headers={"Cache-Control": "no-store"})
+
+@app.get("/admin/attempts")
+def get_block_attempts(request: Request, limit: int = 100):
+    if not is_valid_admin_session(request):
+        raise HTTPException(status_code=401, detail="กรุณาเข้าสู่ระบบ admin ก่อน")
+    limit = max(1, min(limit, 500))
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("SELECT id,username,domain,protocol,reason,attempted_at FROM block_attempts ORDER BY id DESC LIMIT ?", (limit,))
+    rows = c.fetchall()
+    conn.close()
+    return [{"id":r[0],"username":r[1],"domain":r[2],"protocol":r[3],"reason":r[4],"attempted_at":r[5]} for r in rows]
+
+@app.get("/admin/attempts/summary")
+def get_block_attempts_summary(request: Request, since_id: int = 0):
+    """ใช้ใน Admin Panel สำหรับ badge แจ้งเตือน — จำนวนรายการใหม่หลัง since_id และรายการล่าสุด"""
+    if not is_valid_admin_session(request):
+        raise HTTPException(status_code=401, detail="กรุณาเข้าสู่ระบบ admin ก่อน")
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("SELECT COUNT(*) FROM block_attempts WHERE id>?", (since_id,))
+    new_count = c.fetchone()[0]
+    c.execute("SELECT COUNT(*) FROM block_attempts WHERE attempted_at LIKE ?",
+              (datetime.now().strftime("%Y-%m-%d") + "%",))
+    today = c.fetchone()[0]
+    c.execute("SELECT id,username,domain,protocol,attempted_at FROM block_attempts ORDER BY id DESC LIMIT 1")
+    r = c.fetchone()
+    conn.close()
+    latest = {"id":r[0],"username":r[1],"domain":r[2],"protocol":r[3],"attempted_at":r[4]} if r else None
+    return {"new": new_count, "today": today, "latest_id": r[0] if r else 0, "latest": latest}
 
 # ===== Blacklist =====
 @app.get("/blacklist")

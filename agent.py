@@ -7,6 +7,10 @@ import sys
 import ctypes
 import subprocess
 import webbrowser
+import socket
+import socketserver
+import time
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 try:
@@ -22,6 +26,20 @@ HOSTS_MARKER_END = "# === END THREAT DETECTION SYSTEM ==="
 LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(sys.argv[0])), "agent_log.txt")
 LOCAL_PORT = 47812
 CURRENT_USER = ""
+
+# ===== Block Page (sinkhole) =====
+# hosts ชี้โดเมนอันตรายมาที่ 127.0.0.1 แล้วให้ agent รับ connection ไว้เอง
+#   - HTTP  (port 80)  : redirect ไปหน้า Block Page ของ server + รายงาน admin
+#   - HTTPS (port 443) : อ่านชื่อโดเมนจาก SNI ใน TLS ClientHello แล้วรายงาน admin
+#                        (redirect ไม่ได้เพราะไม่มีใบรับรองของโดเมนนั้น)
+BLOCK_IP = "127.0.0.1"
+SINKHOLE_HTTP_PORT = 80
+SINKHOLE_HTTPS_PORT = 443
+BLOCK_PAGE_URL = f"{SERVER_URL}/blocked"
+ATTEMPT_COOLDOWN = 30          # วินาที — กันรายงานซ้ำโดเมนเดิม (เบราว์เซอร์ retry หลายรอบ)
+BLOCKED_DOMAINS = frozenset()  # อัปเดตทุกครั้งที่เขียน hosts
+_last_attempt = {}
+_attempt_lock = threading.Lock()
 
 def is_admin():
     try:
@@ -51,6 +69,7 @@ def fetch_blacklist():
         return []
 
 def update_hosts(domains):
+    global BLOCKED_DOMAINS
     try:
         with open(HOSTS_FILE, "r", encoding="utf-8") as f:
             content = f.read()
@@ -66,11 +85,12 @@ def update_hosts(domains):
                 skip = False
         new_lines.append(HOSTS_MARKER)
         for domain in domains:
-            new_lines.append(f"0.0.0.0 {domain}")
-            new_lines.append(f"0.0.0.0 www.{domain}")
+            new_lines.append(f"{BLOCK_IP} {domain}")
+            new_lines.append(f"{BLOCK_IP} www.{domain}")
         new_lines.append(HOSTS_MARKER_END)
         with open(HOSTS_FILE, "w", encoding="utf-8") as f:
             f.write("\n".join(new_lines))
+        BLOCKED_DOMAINS = frozenset(d.strip().lower() for d in domains if d.strip())
         os.system("ipconfig /flushdns >nul 2>&1")
         log(f"อัปเดต hosts file — บล็อก {len(domains)} domain")
         if CURRENT_USER:
@@ -345,6 +365,157 @@ def start_local_server(tray_agent):
         log(f"เริ่ม local server ไม่ได้: {e}")
 
 
+# ===== Block Page / Sinkhole: รับ connection ของโดเมนที่ถูกบล็อก =====
+def match_blocked(host):
+    """คืนโดเมนใน blacklist ที่ตรงกับ host (ตัด port, จุดท้าย, www. ออก) ถ้าไม่ตรงคืน None"""
+    if not host:
+        return None
+    host = host.strip().lower().rstrip(".")
+    if host.startswith("["):          # IPv6 literal เช่น [::1]:80
+        return None
+    host = host.split(":", 1)[0]
+    blocked = BLOCKED_DOMAINS
+    if host in blocked:
+        return host
+    if host.startswith("www.") and host[4:] in blocked:
+        return host[4:]
+    return None
+
+
+def report_attempt(domain, protocol):
+    """แจ้ง server ว่าผู้ใช้พยายามเข้าโดเมนที่ถูกบล็อก (กันซ้ำโดเมนเดิมภายใน ATTEMPT_COOLDOWN วินาที)"""
+    now = time.time()
+    with _attempt_lock:
+        if now - _last_attempt.get(domain, 0) < ATTEMPT_COOLDOWN:
+            return
+        _last_attempt[domain] = now
+    username = CURRENT_USER
+    log(f"ตรวจพบการพยายามเข้า {domain} ({protocol}) — user: {username or 'ยังไม่ login'}")
+
+    def _send():
+        try:
+            data = json.dumps({"domain": domain, "username": username, "protocol": protocol}).encode()
+            req = urllib.request.Request(
+                f"{SERVER_URL}/attempt", data=data,
+                headers={"Content-Type": "application/json"}, method="POST"
+            )
+            urllib.request.urlopen(req, timeout=5)
+        except Exception as e:
+            log(f"รายงานการพยายามเข้า {domain} ไม่ได้: {e}")
+    threading.Thread(target=_send, daemon=True).start()
+
+
+class BlockPageHandler(BaseHTTPRequestHandler):
+    """port 80: เว็บ HTTP ที่ถูกบล็อก → redirect ไปหน้า Block Page ของ server"""
+
+    def _handle(self):
+        domain = match_blocked(self.headers.get("Host", ""))
+        if not domain:
+            self.send_response(404)
+            self.send_header("Content-Length", "0")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            return
+        report_attempt(domain, "http")
+        location = f"{BLOCK_PAGE_URL}?domain={urllib.parse.quote(domain)}"
+        self.send_response(302)
+        self.send_header("Location", location)
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", "0")
+        self.send_header("Connection", "close")
+        self.end_headers()
+
+    do_GET = do_HEAD = do_POST = do_PUT = do_DELETE = do_OPTIONS = _handle
+
+    def log_message(self, fmt, *args):
+        pass
+
+
+def parse_sni(data):
+    """อ่านชื่อโดเมน (SNI) จาก TLS ClientHello — คืน None ถ้าไม่ใช่ ClientHello หรือไม่มี SNI"""
+    try:
+        if len(data) < 5 or data[0] != 0x16:              # ต้องเป็น TLS Handshake record
+            return None
+        record_len = int.from_bytes(data[3:5], "big")
+        body = data[5:5 + record_len]
+        if len(body) < 4 or body[0] != 0x01:              # ต้องเป็น ClientHello
+            return None
+        p = 4 + 2 + 32                                    # handshake header + version + random
+        p += 1 + body[p]                                  # session id
+        p += 2 + int.from_bytes(body[p:p + 2], "big")     # cipher suites
+        p += 1 + body[p]                                  # compression methods
+        ext_end = p + 2 + int.from_bytes(body[p:p + 2], "big")
+        p += 2
+        while p + 4 <= min(ext_end, len(body)):
+            ext_type = int.from_bytes(body[p:p + 2], "big")
+            ext_len = int.from_bytes(body[p + 2:p + 4], "big")
+            p += 4
+            if ext_type == 0x0000:                        # server_name
+                q = p + 2                                 # ข้าม server_name_list length
+                while q + 3 <= p + ext_len:
+                    name_type = body[q]
+                    name_len = int.from_bytes(body[q + 1:q + 3], "big")
+                    q += 3
+                    if name_type == 0:
+                        return body[q:q + name_len].decode("ascii", "ignore").lower() or None
+                    q += name_len
+                return None
+            p += ext_len
+    except (IndexError, ValueError):
+        return None
+    return None
+
+
+class SniSinkholeHandler(socketserver.BaseRequestHandler):
+    """port 443: เว็บ HTTPS ที่ถูกบล็อก → อ่าน SNI, รายงาน admin แล้วปิด connection"""
+
+    def handle(self):
+        sock = self.request
+        sock.settimeout(3)
+        data = b""
+        try:
+            while len(data) < 16389:                      # 5-byte header + record สูงสุด 16 KB
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                data += chunk
+                if len(data) >= 5 and len(data) >= 5 + int.from_bytes(data[3:5], "big"):
+                    break
+        except (socket.timeout, OSError):
+            pass
+        domain = match_blocked(parse_sni(data))
+        if domain:
+            report_attempt(domain, "https")
+
+
+# ปิด SO_REUSEADDR: บน Windows ค่านี้ยอมให้ bind ทับ port ที่โปรแกรมอื่นใช้อยู่ได้
+class _ThreadingTCPServer(socketserver.ThreadingTCPServer):
+    daemon_threads = True
+    allow_reuse_address = False
+
+
+class _BlockPageServer(ThreadingHTTPServer):
+    daemon_threads = True
+    allow_reuse_address = False
+
+
+def start_sinkhole():
+    """เปิดตัวรับ connection ที่ 127.0.0.1:80 และ :443 — ถ้า port ถูกโปรแกรมอื่นใช้อยู่
+    การบล็อกยังทำงานตามปกติ (connection ถูกปฏิเสธทันที) แค่ไม่มี Block Page / การแจ้งเตือน"""
+    try:
+        http_srv = _BlockPageServer((BLOCK_IP, SINKHOLE_HTTP_PORT), BlockPageHandler)
+        threading.Thread(target=http_srv.serve_forever, daemon=True).start()
+        log(f"Block Page (HTTP) เริ่มทำงานที่ {BLOCK_IP}:{SINKHOLE_HTTP_PORT}")
+    except Exception as e:
+        log(f"เปิด Block Page port {SINKHOLE_HTTP_PORT} ไม่ได้: {e}")
+    try:
+        https_srv = _ThreadingTCPServer((BLOCK_IP, SINKHOLE_HTTPS_PORT), SniSinkholeHandler)
+        threading.Thread(target=https_srv.serve_forever, daemon=True).start()
+        log(f"SNI sinkhole (HTTPS) เริ่มทำงานที่ {BLOCK_IP}:{SINKHOLE_HTTPS_PORT}")
+    except Exception as e:
+        log(f"เปิด SNI sinkhole port {SINKHOLE_HTTPS_PORT} ไม่ได้: {e}")
+
+
 class TrayAgent:
     def __init__(self, blacklist):
         self.blacklist = blacklist
@@ -443,6 +614,7 @@ def main():
 
     agent = TrayAgent(blacklist)
     start_local_server(agent)
+    start_sinkhole()
     agent.start()
 
     # เปิดหน้า web login อัตโนมัติ

@@ -116,6 +116,23 @@
 
   .loading { padding:40px;text-align:center;color:var(--text2);font-family:var(--mono);font-size:13px; }
   .empty { padding:40px;text-align:center;color:var(--text3);font-family:var(--mono);font-size:13px; }
+
+  /* ===== แจ้งเตือนการพยายามเข้าเว็บที่ถูกบล็อก ===== */
+  .tab-badge { display:none;min-width:18px;height:18px;padding:0 5px;margin-left:6px;border-radius:9px;background:var(--danger);color:#fff;font-family:var(--mono);font-size:10px;font-weight:700;line-height:18px;text-align:center;vertical-align:middle; }
+  .tab-badge.show { display:inline-block; }
+  tr.alert-new td { background:rgba(248,81,73,.08); }
+  tr.alert-new td:first-child { box-shadow:inset 3px 0 0 var(--danger); }
+  .proto { display:inline-block;padding:2px 7px;border-radius:4px;font-size:10px;font-weight:700;letter-spacing:.5px; }
+  .proto-http { background:rgba(210,153,34,.15);color:var(--suspicious); }
+  .proto-https { background:rgba(0,212,170,.12);color:var(--accent); }
+  .alert-toast { position:fixed;top:20px;right:20px;z-index:10000;max-width:360px;background:var(--bg2);border:1px solid var(--danger);border-left:4px solid var(--danger);border-radius:8px;padding:14px 16px;box-shadow:0 8px 24px rgba(0,0,0,.4);cursor:pointer;transform:translateX(120%);transition:transform .3s ease; }
+  .alert-toast.show { transform:translateX(0); }
+  .alert-toast-title { font-size:13px;font-weight:600;color:var(--danger);margin-bottom:4px; }
+  .alert-toast-body { font-size:13px;color:var(--text);overflow-wrap:anywhere; }
+  .alert-toast-body b { font-family:var(--mono); }
+  td.alert-domain { color:var(--danger);word-break:break-all; }
+  [data-theme=light] td.alert-domain { color:var(--danger)!important; }
+  [data-theme=light] .alert-toast { background:#fff!important; }
 </style>
 </head>
 <body>
@@ -141,6 +158,7 @@
     <button class="tab" onclick="switchTab('whitelist', this)">✅ Whitelist</button>
     <button class="tab" onclick="switchTab('users', this)">👥 User Activity</button>
     <button class="tab" onclick="switchTab('manage-users', this)">🛠️ Manage Users</button>
+    <button class="tab" id="tab-btn-alerts" onclick="switchTab('alerts', this)">🚨 แจ้งเตือน<span class="tab-badge" id="alert-badge">0</span></button>
   </div>
 
   <main>
@@ -240,7 +258,21 @@
         <div id="manage-users-table"><div class="loading">กำลังโหลด...</div></div>
       </div>
     </div>
+
+    <div id="tab-alerts" class="panel">
+      <div class="section">
+        <div class="section-header">
+          <span class="section-title">🚨 การพยายามเข้าเว็บไซต์ที่ถูกบล็อก <span id="alerts-today" style="color:var(--text2);font-weight:400"></span></span>
+          <button class="btn-refresh" onclick="loadAlerts()">↻ Refresh</button>
+        </div>
+        <div id="alerts-table"><div class="loading">กำลังโหลด...</div></div>
+      </div>
+    </div>
   </main>
+</div>
+<div class="alert-toast" id="alert-toast" onclick="openAlertsTab()">
+  <div class="alert-toast-title">🚨 ตรวจพบการพยายามเข้าเว็บที่ถูกบล็อก</div>
+  <div class="alert-toast-body" id="alert-toast-body"></div>
 </div>
 
 <script>
@@ -274,6 +306,7 @@ function switchTab(name, el) {
   if (name === 'whitelist') loadWhitelist();
   if (name === 'users') loadUsers();
   if (name === 'manage-users') loadManageUsers();
+  if (name === 'alerts') loadAlerts();
 }
 
 function badge(status) {
@@ -616,8 +649,89 @@ async function deleteManagedUser(username) {
   loadManageUsers();
 }
 
+// ===== แจ้งเตือนการพยายามเข้าเว็บที่ถูกบล็อก =====
+// จำ id ล่าสุดที่ admin เห็นแล้วไว้ใน localStorage — รายการที่ id มากกว่านี้นับเป็น "ใหม่"
+const ALERT_SEEN_KEY = 'td-alert-seen-id';
+const BASE_TITLE = document.title;
+let alertLatestId = null;
+
+function esc(s) {
+  return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+function getSeenAlertId() {
+  try { return parseInt(localStorage.getItem(ALERT_SEEN_KEY) || '0', 10) || 0; } catch (e) { return 0; }
+}
+function setSeenAlertId(id) {
+  try { localStorage.setItem(ALERT_SEEN_KEY, String(id)); } catch (e) {}
+}
+function setAlertBadge(n) {
+  const b = document.getElementById('alert-badge');
+  b.textContent = n > 99 ? '99+' : n;
+  b.classList.toggle('show', n > 0);
+  document.title = n > 0 ? `(${n}) ${BASE_TITLE}` : BASE_TITLE;
+}
+function showAlertToast(a) {
+  document.getElementById('alert-toast-body').innerHTML =
+    `ผู้ใช้ <b>${esc(a.username)}</b> พยายามเข้า <b>${esc(a.domain)}</b> (${esc((a.protocol || '').toUpperCase())})`;
+  const t = document.getElementById('alert-toast');
+  t.classList.add('show');
+  clearTimeout(showAlertToast._timer);
+  showAlertToast._timer = setTimeout(() => t.classList.remove('show'), 8000);
+}
+function openAlertsTab() {
+  document.getElementById('alert-toast').classList.remove('show');
+  switchTab('alerts', document.getElementById('tab-btn-alerts'));
+}
+function alertsTabActive() {
+  return document.getElementById('tab-alerts').classList.contains('active');
+}
+
+async function pollAlerts() {
+  let s;
+  try { s = await api(`/admin/attempts/summary?since_id=${getSeenAlertId()}`); } catch (e) { return; }
+  if (!s) return;
+  // มีรายการใหม่เข้ามาตั้งแต่ poll ครั้งก่อน → toast
+  if (alertLatestId !== null && s.latest_id > alertLatestId && s.latest) {
+    showAlertToast(s.latest);
+    if (alertsTabActive()) loadAlerts();
+  }
+  alertLatestId = s.latest_id;
+  if (alertsTabActive()) {
+    setSeenAlertId(s.latest_id);
+    setAlertBadge(0);
+  } else {
+    setAlertBadge(s.new);
+  }
+  document.getElementById('alerts-today').textContent = `— วันนี้ ${s.today} ครั้ง`;
+}
+
+async function loadAlerts() {
+  const seen = getSeenAlertId();
+  const rows = await api('/admin/attempts?limit=200');
+  if (!rows) return;
+  const el = document.getElementById('alerts-table');
+  if (!rows.length) {
+    el.innerHTML = '<div class="empty">ยังไม่มีการพยายามเข้าเว็บไซต์ที่ถูกบล็อก</div>';
+  } else {
+    el.innerHTML = `<table>
+      <thead><tr><th>เวลา</th><th>ผู้ใช้</th><th>โดเมน</th><th>ช่องทาง</th><th>สาเหตุที่บล็อก</th></tr></thead>
+      <tbody>${rows.map(a => `
+        <tr class="${a.id > seen ? 'alert-new' : ''}">
+          <td style="white-space:nowrap">${esc(a.attempted_at)}</td>
+          <td>${esc(a.username)}</td>
+          <td class="alert-domain">${esc(a.domain)}</td>
+          <td><span class="proto proto-${a.protocol === 'https' ? 'https' : 'http'}">${esc((a.protocol || '').toUpperCase())}</span></td>
+          <td style="font-family:var(--sans);color:var(--text2)">${esc(a.reason || '—')}</td>
+        </tr>`).join('')}</tbody></table>`;
+  }
+  if (rows.length) setSeenAlertId(Math.max(seen, rows[0].id));
+  setAlertBadge(0);
+}
+
 loadDashboard();
 setInterval(loadDashboard, 30000);
+pollAlerts();
+setInterval(pollAlerts, 10000);
 </script>
 </body>
 </html>
