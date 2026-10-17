@@ -672,7 +672,7 @@ function setAlertBadge(n) {
 }
 function showAlertToast(a) {
   document.getElementById('alert-toast-body').innerHTML =
-    `ผู้ใช้ <b>${esc(a.username)}</b> พยายามเข้า <b>${esc(a.domain)}</b> (${esc((a.protocol || '').toUpperCase())})`;
+    `มีการพยายามเข้า <b>${esc(a.domain)}</b> (${esc((a.protocol || '').toUpperCase())})`;
   const t = document.getElementById('alert-toast');
   t.classList.add('show');
   clearTimeout(showAlertToast._timer);
@@ -714,11 +714,10 @@ async function loadAlerts() {
     el.innerHTML = '<div class="empty">ยังไม่มีการพยายามเข้าเว็บไซต์ที่ถูกบล็อก</div>';
   } else {
     el.innerHTML = `<table>
-      <thead><tr><th>เวลา</th><th>ผู้ใช้</th><th>โดเมน</th><th>ช่องทาง</th><th>สาเหตุที่บล็อก</th></tr></thead>
+      <thead><tr><th>เวลา</th><th>โดเมน</th><th>ช่องทาง</th><th>สาเหตุที่บล็อก</th></tr></thead>
       <tbody>${rows.map(a => `
         <tr class="${a.id > seen ? 'alert-new' : ''}">
           <td style="white-space:nowrap">${esc(a.attempted_at)}</td>
-          <td>${esc(a.username)}</td>
           <td class="alert-domain">${esc(a.domain)}</td>
           <td><span class="proto proto-${a.protocol === 'https' ? 'https' : 'http'}">${esc((a.protocol || '').toUpperCase())}</span></td>
           <td style="font-family:var(--sans);color:var(--text2)">${esc(a.reason || '—')}</td>
