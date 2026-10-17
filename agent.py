@@ -11,6 +11,9 @@ import socket
 import socketserver
 import time
 import urllib.parse
+import ssl
+import secrets
+import tempfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 try:
@@ -18,6 +21,16 @@ try:
     from PIL import Image, ImageDraw
 except ImportError:
     pass
+
+# ใช้สร้าง Root CA / ใบรับรองสำหรับ Block Page ของเว็บ HTTPS (ถ้าไม่มี จะทำได้แค่แจ้งเตือน)
+try:
+    from cryptography import x509
+    from cryptography.x509.oid import NameOID, ExtendedKeyUsageOID
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    HAS_CRYPTO = True
+except ImportError:
+    HAS_CRYPTO = False
 
 SERVER_URL = "http://143.14.200.159:8000"
 HOSTS_FILE = r"C:\Windows\System32\drivers\etc\hosts"
@@ -30,8 +43,8 @@ CURRENT_USER = ""
 # ===== Block Page (sinkhole) =====
 # hosts ชี้โดเมนอันตรายมาที่ 127.0.0.1 แล้วให้ agent รับ connection ไว้เอง
 #   - HTTP  (port 80)  : redirect ไปหน้า Block Page ของ server + รายงาน admin
-#   - HTTPS (port 443) : อ่านชื่อโดเมนจาก SNI ใน TLS ClientHello แล้วรายงาน admin
-#                        (redirect ไม่ได้เพราะไม่มีใบรับรองของโดเมนนั้น)
+#   - HTTPS (port 443) : ใช้ใบรับรองจาก Local Root CA → redirect ไปหน้า Block Page + รายงาน admin
+#                        (ถ้าเตรียม CA ไม่ได้ จะอ่าน SNI แล้วรายงาน admin อย่างเดียว)
 BLOCK_IP = "127.0.0.1"
 SINKHOLE_HTTP_PORT = 80
 SINKHOLE_HTTPS_PORT = 443
@@ -40,6 +53,16 @@ ATTEMPT_COOLDOWN = 30          # วินาที — กันรายงา
 BLOCKED_DOMAINS = frozenset()  # อัปเดตทุกครั้งที่เขียน hosts
 _last_attempt = {}
 _attempt_lock = threading.Lock()
+
+# ===== Local Root CA (Block Page สำหรับเว็บ HTTPS) =====
+# สร้าง CA ใหม่ทุกครั้งที่ agent เริ่มทำงาน — private key อยู่ในหน่วยความจำเท่านั้น ไม่เขียนลงดิสก์
+# ติดตั้งใบรับรอง CA ลง Windows (LocalMachine\Root) แล้วออกใบรับรองให้เฉพาะโดเมนใน blacklist
+# ลบ CA ออกจาก Windows ตอนกด Exit / ถอนการติดตั้ง / เริ่ม agent รอบถัดไป
+CA_COMMON_NAME = "Threat Detection Local CA"
+CA_ORGANIZATION = "Threat Detection System (Block Page)"
+DEFAULT_TLS_NAME = "blocked.threat-detection.local"
+LOCAL_CA = None        # LocalCA ที่ใช้งานอยู่ (None = ทำ Block Page ของ HTTPS ไม่ได้ → แจ้งเตือนอย่างเดียว)
+TLS_BASE_CTX = None    # SSLContext หลักที่สลับใบรับรองตามชื่อโดเมน (SNI)
 
 def is_admin():
     try:
@@ -466,26 +489,238 @@ def parse_sni(data):
     return None
 
 
-class SniSinkholeHandler(socketserver.BaseRequestHandler):
-    """port 443: เว็บ HTTPS ที่ถูกบล็อก → อ่าน SNI, รายงาน admin แล้วปิด connection"""
+def _sni_report_only(sock):
+    """โหมดสำรอง (ไม่มี Local CA): อ่าน SNI จาก ClientHello, รายงาน admin แล้วปิด connection"""
+    sock.settimeout(3)
+    data = b""
+    try:
+        while len(data) < 16389:                          # 5-byte header + record สูงสุด 16 KB
+            chunk = sock.recv(4096)
+            if not chunk:
+                break
+            data += chunk
+            if len(data) >= 5 and len(data) >= 5 + int.from_bytes(data[3:5], "big"):
+                break
+    except (socket.timeout, OSError):
+        pass
+    domain = match_blocked(parse_sni(data))
+    if domain:
+        report_attempt(domain, "https")
+
+
+# ===== Local Root CA =====
+def _run_hidden(args):
+    """รันคำสั่งโดยไม่เด้งหน้าต่าง console (agent build แบบ --windowed)"""
+    return subprocess.run(args, capture_output=True, text=True,
+                          creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+
+
+class LocalCA:
+    """CA ชั่วคราวของ agent: key สร้างในหน่วยความจำ ไม่เคยเขียนลงดิสก์
+    ออกใบรับรองให้เฉพาะโดเมนที่ถูกบล็อก เพื่อให้ redirect เว็บ HTTPS ไปหน้า Block Page ได้"""
+
+    def __init__(self):
+        now = datetime.datetime.now(datetime.timezone.utc)
+        self.key = ec.generate_private_key(ec.SECP256R1())
+        name = x509.Name([
+            x509.NameAttribute(NameOID.COMMON_NAME, CA_COMMON_NAME),
+            x509.NameAttribute(NameOID.ORGANIZATION_NAME, CA_ORGANIZATION),
+        ])
+        public_key = self.key.public_key()
+        self.cert = (
+            x509.CertificateBuilder()
+            .subject_name(name).issuer_name(name)
+            .public_key(public_key)
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(now - datetime.timedelta(days=1))
+            .not_valid_after(now + datetime.timedelta(days=30))
+            # path_length=0 → CA นี้ออกได้แค่ใบรับรองปลายทาง สร้าง CA ลูกต่อไม่ได้
+            .add_extension(x509.BasicConstraints(ca=True, path_length=0), critical=True)
+            .add_extension(x509.KeyUsage(
+                digital_signature=False, content_commitment=False, key_encipherment=False,
+                data_encipherment=False, key_agreement=False, key_cert_sign=True,
+                crl_sign=True, encipher_only=False, decipher_only=False), critical=True)
+            .add_extension(x509.SubjectKeyIdentifier.from_public_key(public_key), critical=False)
+            .sign(self.key, hashes.SHA256())
+        )
+        self.cert_pem = self.cert.public_bytes(serialization.Encoding.PEM)
+        self.leaf_key = ec.generate_private_key(ec.SECP256R1())
+        # key ของใบรับรองปลายทางเขียนลงไฟล์ชั่วคราวแบบเข้ารหัสด้วยรหัสสุ่มนี้ แล้วลบทิ้งทันที
+        # (ssl.load_cert_chain รับได้แค่ path ของไฟล์)
+        self._key_password = secrets.token_bytes(32)
+        self._contexts = {}
+        self._domain_by_ctx = {}
+        self._lock = threading.Lock()
+
+    def _issue(self, domain):
+        now = datetime.datetime.now(datetime.timezone.utc)
+        names = [domain] if domain == DEFAULT_TLS_NAME else [domain, f"www.{domain}"]
+        return (
+            x509.CertificateBuilder()
+            .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, domain)]))
+            .issuer_name(self.cert.subject)
+            .public_key(self.leaf_key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(now - datetime.timedelta(days=1))
+            .not_valid_after(now + datetime.timedelta(days=7))
+            .add_extension(x509.SubjectAlternativeName([x509.DNSName(n) for n in names]), critical=False)
+            .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+            .add_extension(x509.KeyUsage(
+                digital_signature=True, content_commitment=False, key_encipherment=False,
+                data_encipherment=False, key_agreement=False, key_cert_sign=False,
+                crl_sign=False, encipher_only=False, decipher_only=False), critical=True)
+            .add_extension(x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH]), critical=False)
+            .add_extension(x509.SubjectKeyIdentifier.from_public_key(self.leaf_key.public_key()), critical=False)
+            .add_extension(x509.AuthorityKeyIdentifier.from_issuer_public_key(self.key.public_key()), critical=False)
+            .sign(self.key, hashes.SHA256())
+        )
+
+    def context_for(self, domain):
+        """SSLContext ที่มีใบรับรองของ domain (สร้างครั้งแรกแล้ว cache ไว้)"""
+        with self._lock:
+            ctx = self._contexts.get(domain)
+            if ctx:
+                return ctx
+            chain_pem = self._issue(domain).public_bytes(serialization.Encoding.PEM) + self.cert_pem
+            key_pem = self.leaf_key.private_bytes(
+                serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+                serialization.BestAvailableEncryption(self._key_password))
+            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+            paths = []
+            try:
+                for data in (chain_pem, key_pem):
+                    fd, path = tempfile.mkstemp(prefix="td_", suffix=".pem")
+                    paths.append(path)
+                    with os.fdopen(fd, "wb") as f:
+                        f.write(data)
+                ctx.load_cert_chain(paths[0], paths[1], password=self._key_password)
+            finally:
+                for path in paths:
+                    try:
+                        os.remove(path)
+                    except OSError:
+                        pass
+            self._contexts[domain] = ctx
+            self._domain_by_ctx[id(ctx)] = domain
+            return ctx
+
+    def domain_for(self, ctx):
+        return self._domain_by_ctx.get(id(ctx))
+
+
+def remove_local_ca():
+    """ลบใบรับรอง CA ของระบบ (ทุกตัวที่เคยติดตั้ง) ออกจาก Windows"""
+    script = ("$c = Get-ChildItem Cert:\\LocalMachine\\Root | "
+              f"Where-Object {{ $_.Subject -like '*CN={CA_COMMON_NAME}*' }}; "
+              "$c | Remove-Item; ($c | Measure-Object).Count")
+    try:
+        r = _run_hidden(["powershell", "-NoProfile", "-NonInteractive", "-Command", script])
+        removed = (r.stdout or "").strip()
+        if removed and removed != "0":
+            log(f"ลบ Root CA เดิมออกจาก Windows แล้ว {removed} รายการ")
+        elif r.returncode != 0:
+            log(f"ลบ Root CA ไม่ได้: {(r.stderr or '').strip()}")
+    except Exception as e:
+        log(f"ลบ Root CA ไม่ได้: {e}")
+
+
+def install_local_ca(ca):
+    """ติดตั้งใบรับรอง CA (ส่วน public เท่านั้น) ลง LocalMachine\\Root"""
+    fd, path = tempfile.mkstemp(prefix="td_ca_", suffix=".cer")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(ca.cert.public_bytes(serialization.Encoding.DER))
+        r = _run_hidden(["certutil", "-addstore", "-f", "Root", path])
+        if r.returncode != 0:
+            log(f"ติดตั้ง Root CA ไม่ได้: {(r.stdout or r.stderr or '').strip()[-300:]}")
+            return False
+        return True
+    except Exception as e:
+        log(f"ติดตั้ง Root CA ไม่ได้: {e}")
+        return False
+    finally:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
+def _sni_callback(ssl_sock, server_name, base_ctx):
+    """เลือกใบรับรองตามชื่อโดเมนที่เบราว์เซอร์ขอ — ออกให้เฉพาะโดเมนที่ถูกบล็อก"""
+    domain = match_blocked(server_name)
+    if not domain:
+        return ssl.ALERT_DESCRIPTION_UNRECOGNIZED_NAME
+    try:
+        ssl_sock.context = LOCAL_CA.context_for(domain)
+    except Exception as e:
+        log(f"ออกใบรับรองให้ {domain} ไม่ได้: {e}")
+        report_attempt(domain, "https")
+        return ssl.ALERT_DESCRIPTION_INTERNAL_ERROR
+    report_attempt(domain, "https")
+    return None
+
+
+def setup_tls_block_page():
+    """เตรียม Block Page สำหรับเว็บ HTTPS — คืน True ถ้าพร้อม, False = ใช้โหมดแจ้งเตือนอย่างเดียว"""
+    global LOCAL_CA, TLS_BASE_CTX
+    if not HAS_CRYPTO:
+        log("ไม่พบไลบรารี cryptography — เว็บ HTTPS จะแจ้งเตือนได้อย่างเดียว ไม่มี Block Page")
+        return False
+    try:
+        remove_local_ca()                    # ลบ CA ของรอบก่อน (เผื่อ agent ถูกปิดกะทันหัน)
+        ca = LocalCA()
+        if not install_local_ca(ca):
+            return False
+        base_ctx = ca.context_for(DEFAULT_TLS_NAME)
+        base_ctx.sni_callback = _sni_callback
+        LOCAL_CA, TLS_BASE_CTX = ca, base_ctx
+        log("ติดตั้ง Root CA สำหรับ Block Page (HTTPS) แล้ว — key อยู่ในหน่วยความจำเท่านั้น")
+        return True
+    except Exception as e:
+        log(f"เตรียม Block Page (HTTPS) ไม่ได้: {e}")
+        return False
+
+
+class HttpsSinkholeHandler(socketserver.BaseRequestHandler):
+    """port 443: เว็บ HTTPS ที่ถูกบล็อก
+    - มี Local CA: TLS handshake ด้วยใบรับรองของโดเมนนั้น แล้ว redirect ไปหน้า Block Page
+    - ไม่มี: อ่าน SNI, รายงาน admin แล้วปิด connection"""
 
     def handle(self):
-        sock = self.request
-        sock.settimeout(3)
-        data = b""
+        base_ctx = TLS_BASE_CTX
+        if base_ctx is None:
+            _sni_report_only(self.request)
+            return
+        self.request.settimeout(5)
         try:
-            while len(data) < 16389:                      # 5-byte header + record สูงสุด 16 KB
-                chunk = sock.recv(4096)
+            tls = base_ctx.wrap_socket(self.request, server_side=True)
+        except (ssl.SSLError, OSError):
+            return                           # ไม่ใช่โดเมนที่ถูกบล็อก / เบราว์เซอร์ไม่ยอมรับใบรับรอง
+        try:
+            data = b""
+            while b"\r\n\r\n" not in data and len(data) < 16384:
+                chunk = tls.recv(4096)
                 if not chunk:
                     break
                 data += chunk
-                if len(data) >= 5 and len(data) >= 5 + int.from_bytes(data[3:5], "big"):
-                    break
-        except (socket.timeout, OSError):
+            domain = LOCAL_CA.domain_for(tls.context)
+            if not domain or domain == DEFAULT_TLS_NAME:
+                return
+            location = f"{BLOCK_PAGE_URL}?domain={urllib.parse.quote(domain)}"
+            tls.sendall((
+                "HTTP/1.1 302 Found\r\n"
+                f"Location: {location}\r\n"
+                "Cache-Control: no-store\r\n"
+                "Content-Length: 0\r\n"
+                "Connection: close\r\n\r\n").encode("ascii"))
+        except (ssl.SSLError, OSError):
             pass
-        domain = match_blocked(parse_sni(data))
-        if domain:
-            report_attempt(domain, "https")
+        finally:
+            try:
+                tls.close()
+            except OSError:
+                pass
 
 
 # ปิด SO_REUSEADDR: บน Windows ค่านี้ยอมให้ bind ทับ port ที่โปรแกรมอื่นใช้อยู่ได้
@@ -509,11 +744,12 @@ def start_sinkhole():
     except Exception as e:
         log(f"เปิด Block Page port {SINKHOLE_HTTP_PORT} ไม่ได้: {e}")
     try:
-        https_srv = _ThreadingTCPServer((BLOCK_IP, SINKHOLE_HTTPS_PORT), SniSinkholeHandler)
+        https_srv = _ThreadingTCPServer((BLOCK_IP, SINKHOLE_HTTPS_PORT), HttpsSinkholeHandler)
         threading.Thread(target=https_srv.serve_forever, daemon=True).start()
-        log(f"SNI sinkhole (HTTPS) เริ่มทำงานที่ {BLOCK_IP}:{SINKHOLE_HTTPS_PORT}")
+        mode = "Block Page + แจ้งเตือน" if TLS_BASE_CTX else "แจ้งเตือนอย่างเดียว (SNI)"
+        log(f"HTTPS sinkhole เริ่มทำงานที่ {BLOCK_IP}:{SINKHOLE_HTTPS_PORT} — โหมด: {mode}")
     except Exception as e:
-        log(f"เปิด SNI sinkhole port {SINKHOLE_HTTPS_PORT} ไม่ได้: {e}")
+        log(f"เปิด HTTPS sinkhole port {SINKHOLE_HTTPS_PORT} ไม่ได้: {e}")
 
 
 class TrayAgent:
@@ -584,6 +820,8 @@ class TrayAgent:
         CURRENT_USER = ""
         self.running = False
         clear_hosts()
+        if LOCAL_CA is not None:
+            remove_local_ca()
         if self.tray:
             self.tray.stop()
         os._exit(0)
@@ -614,6 +852,7 @@ def main():
 
     agent = TrayAgent(blacklist)
     start_local_server(agent)
+    setup_tls_block_page()
     start_sinkhole()
     agent.start()
 

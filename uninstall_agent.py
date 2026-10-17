@@ -17,7 +17,7 @@ def uninstall():
 
     if not messagebox.askyesno(
         "Uninstall",
-        "ต้องการถอนการติดตั้ง Threat Detection System ใช่มั้ย?\n\nระบบจะ:\n- ลบออกจาก Task Scheduler\n- คืนค่า hosts file\n- ลบไฟล์โปรแกรม"
+        "ต้องการถอนการติดตั้ง Threat Detection System ใช่มั้ย?\n\nระบบจะ:\n- ลบออกจาก Task Scheduler\n- คืนค่า hosts file\n- ลบใบรับรอง Root CA ของระบบ\n- ลบไฟล์โปรแกรม"
     ):
         root.destroy()
         return
@@ -78,6 +78,20 @@ def uninstall():
         os.system("ipconfig /flushdns >nul 2>&1")
     except Exception as e:
         errors.append(f"คืนค่า hosts ไม่ได้: {e}")
+
+    # 2.5 ลบใบรับรอง Root CA ที่ agent ติดตั้งไว้สำหรับ Block Page ของเว็บ HTTPS
+    #     (ชื่อ CN ต้องตรงกับ CA_COMMON_NAME ใน agent.py)
+    try:
+        script = ("Get-ChildItem Cert:\\LocalMachine\\Root | "
+                  "Where-Object { $_.Subject -like '*CN=Threat Detection Local CA*' } | Remove-Item")
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+            capture_output=True, text=True, creationflags=0x08000000
+        )
+        if result.returncode != 0:
+            errors.append("ลบใบรับรอง Root CA ไม่ได้")
+    except Exception as e:
+        errors.append(f"ลบใบรับรอง Root CA ไม่ได้: {e}")
 
     # 3. ลบไฟล์ที่เกี่ยวข้อง
     import time
